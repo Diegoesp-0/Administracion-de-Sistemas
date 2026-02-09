@@ -18,7 +18,6 @@ Write-Host "========= CONFIGURACION DHCP ========="
 
 $SCOPE = Read-Host "Nombre del ambito"
 
-# Funcion para validar IP
 function Validar-IP {
     param ([string]$ip)
 
@@ -57,25 +56,23 @@ do {
 Clear-Host
 Write-Host "Configurando DHCP..."
 
-# Calcular red base /24
 $red = ($IPinicial.Split('.')[0..2] -join '.') + ".0"
 $mascara = "255.255.255.0"
 
-# Crear Scope
+if (-not (Get-DhcpServerv4Scope -ScopeId $red -ErrorAction SilentlyContinue)) {
 Add-DhcpServerv4Scope `
     -Name $SCOPE `
     -StartRange $IPinicial `
     -EndRange $IPfinal `
     -SubnetMask $mascara `
     -State Active
+}
 
-# Configurar opciones
 Set-DhcpServerv4OptionValue `
     -ScopeId $red `
     -Router $GATEWAY `
     -DnsServer $DNS
 
-# Configurar lease
 Set-DhcpServerv4Scope `
     -ScopeId $red `
     -LeaseDuration ([TimeSpan]::FromSeconds($LEASE))
