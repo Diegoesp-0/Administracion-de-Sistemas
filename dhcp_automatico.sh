@@ -106,10 +106,10 @@ clear
 echo "Configurando archivo DHCP..."
 
 
-red = "${IPinicial%.*}.0"
-mascara =  "255.255.255.0"
+red="${IPinicial%.*}.0"
+mascara="255.255.255.0"
 
-sudo bash -c "cat /etc/dhcp/dhcp.conf" << EOF
+sudo bash -c "cat > /etc/dhcpd.conf" << EOF
 authoritative;
 
 default-lease-time $LEASE;
@@ -130,8 +130,18 @@ ip -o link show
 echo "----------------------------------------------"
 read -p "Digite la interfaz de red: " INTERFAZ
 
-sudo sed -i "s/^DHCPD_INTERFACE=.*/DHCPD_INTERFACE=\"%INTERFAZ\"/" /etc/sysconfig/dhcpd
+sudo sed -i "s/^DHCPD_INTERFACE=.*/DHCPD_INTERFACE=\"$INTERFAZ\"/" /etc/sysconfig/dhcpd
 
+sudo systemctl enable dhcpd
+sudo systemctl restart dhcpd
+sleep 2
+clear
+
+echo "========= MONITOREO ========="
+
+echo ""
+echo "Leases activos: "
+grep lease /var/lib/dhcp/db/dhcpd.leases
 
 
 
