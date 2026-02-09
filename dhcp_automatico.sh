@@ -134,14 +134,16 @@ sudo sed -i "s/^DHCPD_INTERFACE=.*/DHCPD_INTERFACE=\"$INTERFAZ\"/" /etc/sysconfi
 
 sudo systemctl enable dhcpd
 sudo systemctl restart dhcpd
-sleep 2
 clear
 
-echo "========= MONITOREO ========="
+echo "========= SERVIDO DHCP ACTIVO ========="
+systemctl status dhcpd --no-oager | head -n 10
 
 echo ""
-echo "Leases activos: "
-grep lease /var/lib/dhcp/db/dhcpd.leases
+echo "========= MONITOREO ========="
+echo "CTRL+C para salir"
+
+tail -f /var/lib/dhcp/db/dhcpd.leases
 
 
 
