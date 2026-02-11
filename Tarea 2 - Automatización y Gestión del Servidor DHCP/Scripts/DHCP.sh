@@ -54,6 +54,33 @@ validar_rango(){
 
 }
 
+obtener_red(){
+	IFS='.' read -r p1 p2 p3 _ <<< "$1"
+	echo "$p1.$p2.$p3.0"
+}
+
+obtener_broadcast(){
+	IFS="." read -r p1 p2 p3 _ <<< "$1"
+	echo "$p1.$p2.$p3.255"
+}
+
+validar_gateway(){
+	local gateway=$1
+	local ip_ref=$2
+	
+	validar_ip "$gateway" || return 1
+	
+	local red
+	local broadcast
+
+	red=$(obtener_red "$ip_ref")
+	broadcast=$(obtener_broadcast "$ip_ref")
+
+	[[ $(obtener_red "$gateway") == "$red" ]] || return 1
+
+	return 0
+}
+
 verificar(){
 clear
 	if zypper se -i dhcp-server > /dev/null 2>&1
@@ -77,7 +104,6 @@ clear
 
 conf_parametros(){
 clear
-	echo ""
 	echo "========== CONFIGURAR PARAMETROS ========== "
 	read -p "Nombre del ambito: " SCOPE_T
 	sed -i "s/^SCOPE=.*/SCOPE=$SCOPE_T/" "$0"
@@ -87,14 +113,14 @@ clear
 	do
 		clear
 		echo "========== CONFIGURAR PARAMETROS =========="
-		echo "Nombre del ambito: $SCOPE_T
+		echo "Nombre del ambito: $SCOPE_T"
 		read -p "IP inicial del rango: " INICIAL_T
 		
 		if ! validar_ip "$INICIAL_T"
 		then	
 			clear
 			echo "La IP inicial no es valida"
-			sleep 1
+			sleep 2
 			continue
 		fi
 
@@ -104,7 +130,7 @@ clear
 		then
 			clear
 			echo "La IP final no es valida"
-			sleep 1
+			sleep 2
 			continue
 		fi
 
@@ -112,11 +138,31 @@ clear
 		then 
 			clear
 			echo "La IP inicial debe ser menor a la IP final"
-			sleep 1
+			sleep 2
 			continue
 		fi	
-	break
-done		
+		break
+	done		
+	
+	while true
+	do 
+		clear
+		echo "========== CONFIGURAR PARAMETROS =========="
+		echo "Nombre del ambito: $SCOPE_T"
+		echo "IP inicial del rango: $INICIAL_T"
+		echo "IP final del rango: $FINAL_T"
+		read -p "Gateway: " $GATEWAY_T
+		
+		if validar_gateway "$GATEWAY_T" "$INICIAL_T"
+		then
+			break
+		else
+			clear
+			echo "Gateway invalido..."
+			sleep 2			
+		fi
+	done		
+clear
 
 }
 
@@ -129,8 +175,6 @@ clear
 		echo "Parametros no asignados..."
 		echo ""
 	else
-		
-		echo ""
 		echo "========== PARAMETROS CONFIGURADOS =========="
 		echo "SCOPE = $SCOPE"	
 		echo "IP INICIAL = $IPINICIAL"
@@ -166,7 +210,7 @@ then
 	ver_parametros
 fi
 
-if [ "$1" = "parametrosconf"
+if [ "$1" = "parametrosconf" ]
 then
 	conf_parametros
 fi
