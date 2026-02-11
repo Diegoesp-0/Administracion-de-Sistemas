@@ -2,13 +2,13 @@
 
 # =============== VARIABLES ==============================================
 
-SCOPE=X
-IPINICIAL=X
-IPFINAL=X
-GATEWAY=X
-DNS=X
-DNS2=X
-LEASE=X
+SCOPE=Conexion
+IPINICIAL=192.168.100.30
+IPFINAL=192.168.100.60
+GATEWAY=192.168.100.1
+DNS=8.8.8.8
+DNS2=4.4.4.4
+LEASE=5000
 MASCARA=X
 
 #  =============== FUNCIONES =============================================
@@ -30,6 +30,8 @@ validar_ip(){
 	[[ $p1 -eq 0 && $p2 -eq 0 && $p3 -eq 0 && $p4 -eq 0 ]] && return 1
 
 	[[ $p1 -eq 255 && $p2 -eq 255 && $p3 -eq 255 && $p4 -eq 255 ]] && return 1
+
+	[[ $p1 -eq 127 ]] && return 1
 
 return 0
 }
@@ -95,7 +97,8 @@ validar_lease(){
 	local lease=$1
 	
 	[[ "$lease" =~ ^[0-9]+$ ]] || return 1
-	[[ "Slease" -gt 0 ]] || return 1
+	[[ "$lease" -gt 0 ]] || return 1
+return 0
 }
 
 verificar(){
@@ -251,6 +254,7 @@ clear
 			sleep 2
 			continue
 		fi
+		break
 	done
 
 	
@@ -263,7 +267,7 @@ clear
 	echo "DNS primario: $DNS_T"
 	[[ "$DNS2_T" != "X" ]] && echo "DNS secundario: $DNS2_T"
 	echo "Lease (en segundos): $LEASE_T"
-	echo "---------------------------------------------
+	echo "---------------------------------------------"
 	read -p "Datos capturados, precione enter para continuar..."
 
 	sed -i "s/^SCOPE=.*/SCOPE=$SCOPE_T/" "$0"
