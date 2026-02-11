@@ -72,11 +72,15 @@ validar_gateway(){
 	
 	local red
 	local broadcast
+	local gw_red
 
 	red=$(obtener_red "$ip_ref")
 	broadcast=$(obtener_broadcast "$ip_ref")
+	gw_red=$(obtener_red "$gateway")
 
-	[[ $(obtener_red "$gateway") == "$red" ]] || return 1
+	[[ "$gw_red" == "$red" ]] || return 1
+	[[ "$gateway" == "$red" ]] && return 1
+	[[ "$gateway" == "$broadcast" ]] && return 1
 
 	return 0
 }
@@ -94,7 +98,7 @@ clear
 		echo ""
 		read -p "Desea descargar DHCP-SERVER? (S/s): " OPC
 
-		if [ "$OPC" = "S" ] | [ "$OPC" = "s" ]
+		if [ "$OPC" = "S" ] || [ "$OPC" = "s" ]
 		then
 			echo "Descargando..."
 			sudo zypper install dhcp-server
@@ -124,6 +128,8 @@ clear
 			continue
 		fi
 
+		sed -i "s/^IPINICIAL=.*/IPINICIAL=$INICIAL_T/" "$0"
+
 		read -p "IP final del rango: " FINAL_T
 		
 		if ! validar_ip "$FINAL_T"
@@ -133,6 +139,9 @@ clear
 			sleep 2
 			continue
 		fi
+
+		sed -i "s/^IPFINAL=.*/IPFINAL=$FINAL_T/" "$0"
+
 
 		if ! validar_rango "$INICIAL_T" "$FINAL_T"	
 		then 
@@ -153,7 +162,7 @@ clear
 		echo "IP final del rango: $FINAL_T"
 		read -p "Gateway: " $GATEWAY_T
 		
-		if validar_gateway "$GATEWAY_T" "$INICIAL_T"
+		if validar_gateway "$GATEWAY_T" "$IPINICIAL" >/dev/null 2>&1
 		then
 			break
 		else
@@ -163,6 +172,8 @@ clear
 		fi
 	done		
 clear
+
+echo "Todo bien"
 
 }
 
