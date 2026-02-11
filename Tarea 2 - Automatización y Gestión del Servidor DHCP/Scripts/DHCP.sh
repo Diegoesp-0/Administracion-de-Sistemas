@@ -7,7 +7,9 @@ IPINICIAL=X
 IPFINAL=X
 GATEWAY=X
 DNS=X
+DNS2=X
 LEASE=X
+MASCARA=X
 
 #  =============== FUNCIONES =============================================
 validar_ip(){
@@ -54,6 +56,10 @@ validar_rango(){
 
 }
 
+validar_dns(){
+	validar_ip "$1"
+}
+
 obtener_red(){
 	IFS='.' read -r p1 p2 p3 _ <<< "$1"
 	echo "$p1.$p2.$p3.0"
@@ -85,6 +91,13 @@ validar_gateway(){
 	return 0
 }
 
+validar_lease(){
+	local lease=$1
+	
+	[[ "$lease" =~ ^[0-9]+$ ]] || return 1
+	[[ "Slease" -gt 0 ]] || return 1
+}
+
 verificar(){
 clear
 	if zypper se -i dhcp-server > /dev/null 2>&1
@@ -110,8 +123,6 @@ conf_parametros(){
 clear
 	echo "========== CONFIGURAR PARAMETROS ========== "
 	read -p "Nombre del ambito: " SCOPE_T
-	sed -i "s/^SCOPE=.*/SCOPE=$SCOPE_T/" "$0"
-
 	
 	while true
 	do
@@ -128,8 +139,6 @@ clear
 			continue
 		fi
 
-		sed -i "s/^IPINICIAL=.*/IPINICIAL=$INICIAL_T/" "$0"
-
 		read -p "IP final del rango: " FINAL_T
 		
 		if ! validar_ip "$FINAL_T"
@@ -139,9 +148,6 @@ clear
 			sleep 2
 			continue
 		fi
-
-		sed -i "s/^IPFINAL=.*/IPFINAL=$FINAL_T/" "$0"
-
 
 		if ! validar_rango "$INICIAL_T" "$FINAL_T"	
 		then 
@@ -160,9 +166,9 @@ clear
 		echo "Nombre del ambito: $SCOPE_T"
 		echo "IP inicial del rango: $INICIAL_T"
 		echo "IP final del rango: $FINAL_T"
-		read -p "Gateway: " $GATEWAY_T
+		read -p "Gateway: " GATEWAY_T
 		
-		if validar_gateway "$GATEWAY_T" "$IPINICIAL" >/dev/null 2>&1
+		if validar_gateway "$GATEWAY_T" "$INICIAL_T" >/dev/null 2>&1
 		then
 			break
 		else
@@ -172,8 +178,101 @@ clear
 		fi
 	done		
 clear
+	
+	while true
+	do
+		clear
+		echo "========== CONFIGURAR PARAMETROS =========="
+		echo "Nombre del ambito: $SCOPE_T"
+		echo "IP inicial del rango: $INICIAL_T"
+		echo "IP final del rango: $FINAL_T"
+		echo "Gateway: $GATEWAY_T"
+		read -p "DNS primario: " DNS_T
 
-echo "Todo bien"
+		if ! validar_dns "$DNS_T"
+		then
+			clear
+			echo "DNS primario invalido..."
+			sleep 2
+			continue
+		fi
+		
+		clear
+		echo "========== CONFIGURAR PARAMETROS =========="
+		echo "Nombre del ambito: $SCOPE_T"
+		echo "IP inicial del rango: $INICIAL_T"
+		echo "IP final del rango: $FINAL_T"
+		echo "Gateway: $GATEWAY_T"
+		echo "DNS primario: $DNS_T"
+		read -p "DNS secundario (Enter para omitir): " DNS2_T
+
+		if [[ -z "$DNS2_T" ]]
+		then
+			DNS2_T="X"
+			break
+		fi
+
+		if ! validar_dns "$DNS2_T"
+		then
+			clear
+			echo "DNS secundario invalido..."
+			sleep 2
+			continue
+		fi
+		
+		if [[ "$DNS_T" == "$DNS2_T" ]]
+		then
+			clear
+			echo " El DNS secundario no puede ser igual al primario..."
+			sleep 2
+			continue
+		fi
+
+		break
+	done
+
+	while true
+	do
+		clear
+		echo "========== CONFIGURAR PARAMETROS =========="
+		echo "Nombre del ambito: $SCOPE_T"
+		echo "IP inicial del rango: $INICIAL_T"
+		echo "IP final del rango: $FINAL_T"
+		echo "Gateway: $GATEWAY_T"
+		echo "DNS primario: $DNS_T"
+		[[ "$DNS2_T" != "X" ]] && echo "DNS secundario: $DNS2_T"
+		
+		read -p "Lease (en segundos): " LEASE_T
+		
+		if ! validar_lease "$LEASE_T"
+		then
+			clear
+			echo "Lease invalido..."
+			sleep 2
+			continue
+		fi
+	done
+
+	
+	clear
+	echo "========== CONFIGURAR PARAMETROS =========="
+	echo "Nombre del ambito: $SCOPE_T"
+	echo "IP inicial del rango: $INICIAL_T"
+	echo "IP final del rango: $FINAL_T"
+	echo "Gateway: $GATEWAY_T"
+	echo "DNS primario: $DNS_T"
+	[[ "$DNS2_T" != "X" ]] && echo "DNS secundario: $DNS2_T"
+	echo "Lease (en segundos): $LEASE_T"
+	echo "---------------------------------------------
+	read -p "Datos capturados, precione enter para continuar..."
+
+	sed -i "s/^SCOPE=.*/SCOPE=$SCOPE_T/" "$0"
+	sed -i "s/^IPINICIAL=.*/IPINICIAL=$INICIAL_T/" "$0"
+	sed -i "s/^IPFINAL=.*/IPFINAL=$FINAL_T/" "$0"
+	sed -i "s/^GATEWAY=.*/GATEWAY=$GATEWAY_T/" "$0"
+	sed -i "s/^DNS=.*/DNS=$DNS_T/" "$0"
+	sed -i "s/^DNS2=.*/DNS2=$DNS2_T/" "$0"
+	sed -i "s/^LEASE=.*/LEASE=$LEASE_T/" "$0"
 
 }
 
@@ -192,6 +291,7 @@ clear
 		echo "IP FINAL = $IPFINAL"
 		echo "GATEWAY = $GATEWAY"
 		echo "DNS = $DNS"
+		echo "DNS 2= $DNS2"
 		echo "LEASE = $LEASE"
 		echo ""
 	fi
