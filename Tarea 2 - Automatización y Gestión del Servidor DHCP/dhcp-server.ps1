@@ -37,7 +37,7 @@ function Validar-IP {
 }
 
 function IP-A-Numero  { param([string]$ip); $p = $ip -split '\.'; return ([long]$p[0]*16777216)+([long]$p[1]*65536)+([long]$p[2]*256)+[long]$p[3] }
-function Numero-A-IP  { param([long]$n); return "$([int]($n/16777216)%256).$([int]($n/65536)%256).$([int]($n/256)%256).$([int]$n%256)" }
+function Numero-A-IP  { param([long]$n); return "$([long]($n/16777216)%256).$([long]($n/65536)%256).$([long]($n/256)%256).$([long]$n%256)" }
 function Obtener-Red  { param([string]$ip); $p=$ip -split '\.'; return "$($p[0]).$($p[1]).$($p[2]).0" }
 function Obtener-BC   { param([string]$ip); $p=$ip -split '\.'; return "$($p[0]).$($p[1]).$($p[2]).255" }
 function Incrementar-IP { param([string]$ip); return Numero-A-IP((IP-A-Numero $ip)+1) }
