@@ -59,15 +59,28 @@ function Validar-Gateway {
 function Calcular-Mascara {
     param([string]$i, [string]$f)
     $n1 = IP-A-Numero $i; $n2 = IP-A-Numero $f
-    $cidr = 32
+
+    # Tabla de mascaras por CIDR - sin bit shifting, sin overflow
+    $mascaras = @{
+        8  = "255.0.0.0";     9  = "255.128.0.0";   10 = "255.192.0.0"
+        11 = "255.224.0.0";   12 = "255.240.0.0";   13 = "255.248.0.0"
+        14 = "255.252.0.0";   15 = "255.254.0.0";   16 = "255.255.0.0"
+        17 = "255.255.128.0"; 18 = "255.255.192.0"; 19 = "255.255.224.0"
+        20 = "255.255.240.0"; 21 = "255.255.248.0"; 22 = "255.255.252.0"
+        23 = "255.255.254.0"; 24 = "255.255.255.0"; 25 = "255.255.255.128"
+        26 = "255.255.255.192"; 27 = "255.255.255.224"; 28 = "255.255.255.240"
+        29 = "255.255.255.248"; 30 = "255.255.255.252"
+    }
+
+    # Buscar el CIDR mas pequeno que cubra el rango
+    $cidr = 30
     while ($cidr -ge 8) {
-        if (($n2 - $n1 + 1 + 2) -le ([math]::Pow(2, 32 - $cidr) - 2)) { break }
+        $hosts = [math]::Pow(2, 32 - $cidr) - 2
+        if (($n2 - $n1 + 1) -le $hosts) { break }
         $cidr--
     }
-    $m = 0
-    for ($b = 0; $b -lt $cidr; $b++) { $m = ($m -shl 1) -bor 1 }
-    for ($b = $cidr; $b -lt 32; $b++) { $m = $m -shl 1 }
-    return Numero-A-IP ([long]($m -band 0xFFFFFFFF))
+
+    return $mascaras[$cidr]
 }
 
 function DHCP-Instalado {
@@ -86,8 +99,8 @@ function Opcion-Verificar {
     if (DHCP-Instalado) {
         Write-Host ""; Write-Host "DHCP-SERVER esta instalado :D"; Write-Host ""
     } else {
-        Write-Host ""; Write-Host "DHCP-SERVER no esta instalado"; Write-Host ""
-        $opc = Read-Host "Quieres instalar DHCP-SERVER? (S/s)"
+        Write-Host ""; Write-Host "El rol DHCP-SERVER no esta instalado"; Write-Host ""
+        $opc = Read-Host "Desea instalar el rol DHCP-SERVER? (S/s)"
         if ($opc -eq "S" -or $opc -eq "s") {
             Write-Host "Instalando..."
             Install-WindowsFeature -Name DHCP -IncludeManagementTools
@@ -295,7 +308,7 @@ while ($true) {
     Clear-Host
     Write-Host ""
     Write-Host "============ SERVIDOR DHCP ============"
-    Write-Host " 1. Verificar DHCP"
+    Write-Host " 1. Verificar / Instalar rol DHCP"
     Write-Host " 2. Ver parametros configurados"
     Write-Host " 3. Configurar parametros"
     Write-Host " 4. Iniciar servidor"
