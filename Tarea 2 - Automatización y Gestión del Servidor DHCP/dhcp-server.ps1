@@ -86,8 +86,8 @@ function Opcion-Verificar {
     if (DHCP-Instalado) {
         Write-Host ""; Write-Host "DHCP-SERVER esta instalado :D"; Write-Host ""
     } else {
-        Write-Host ""; Write-Host "El rol DHCP-SERVER no esta instalado"; Write-Host ""
-        $opc = Read-Host "Desea instalar el rol DHCP-SERVER? (S/s)"
+        Write-Host ""; Write-Host "DHCP-SERVER no esta instalado"; Write-Host ""
+        $opc = Read-Host "Quieres instalar DHCP-SERVER? (S/s)"
         if ($opc -eq "S" -or $opc -eq "s") {
             Write-Host "Instalando..."
             Install-WindowsFeature -Name DHCP -IncludeManagementTools
@@ -295,7 +295,7 @@ while ($true) {
     Clear-Host
     Write-Host ""
     Write-Host "============ SERVIDOR DHCP ============"
-    Write-Host " 1. Verificar / Instalar rol DHCP"
+    Write-Host " 1. Verificar DHCP"
     Write-Host " 2. Ver parametros configurados"
     Write-Host " 3. Configurar parametros"
     Write-Host " 4. Iniciar servidor"
