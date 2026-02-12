@@ -430,7 +430,6 @@ conf_parametros(){
 	echo "---------------------------------------------"
 	
 	if calcular_mascara "$INICIAL_T" "$FINAL_T"; then
-		echo "Mascara calculada: $mascara"
 		MASCARA_T="$mascara"
 	else
 		echo "Error al calcular la mascara"
@@ -501,19 +500,44 @@ iniciar_servidor(){
 	local interfaz=$(obtener_interfaz "$IPINICIAL")
 	
 	if [[ -z "$interfaz" ]]; then
+		echo "ERROR: No se pudo detectar la interfaz de red"
 		return 1
 	fi
+	
+	echo "Interfaz detectada: $interfaz"
 	
 	if ! configurar_ip_estatica "$IPINICIAL" "$MASCARA" "$interfaz"; then
 		return 1
 	fi
 	
+	echo ""
+	echo "Configurando interfaz DHCP en el sistema..."
+	
+	# Configurar la interfaz en /etc/sysconfig/dhcpd
+	if [[ -f /etc/sysconfig/dhcpd ]]; then
+		sudo sed -i "s/^DHCPD_INTERFACE=.*/DHCPD_INTERFACE=\"$interfaz\"/" /etc/sysconfig/dhcpd
+		sudo sed -i "s/^DHCPD6_INTERFACE=.*/DHCPD6_INTERFACE=\"\"/" /etc/sysconfig/dhcpd
+	else
+		sudo bash -c "cat > /etc/sysconfig/dhcpd << EOF
+DHCPD_INTERFACE=\"$interfaz\"
+DHCPD6_INTERFACE=\"\"
+DHCPD_OTHER_ARGS=\"\"
+DHCPD_RUN_CHROOTED=\"no\"
+EOF"
+	fi
+	
+	echo "Generando configuracion DHCP..."
+	
 	local ip_reparto=$(incrementar_ip "$IPINICIAL")
 	local red=$(obtener_red "$IPINICIAL")
 	local broadcast=$(obtener_broadcast "$IPINICIAL")
 	
+	# Crear directorio de leases si no existe
+	sudo mkdir -p /var/lib/dhcp/db
+	sudo touch /var/lib/dhcp/db/dhcpd.leases
+	
+	# Generar configuración
 	sudo tee /etc/dhcpd.conf > /dev/null << EOF
-
 ddns-update-style none;
 authoritative;
 default-lease-time $LEASE;
@@ -539,13 +563,18 @@ EOF
 	
 	sudo bash -c "echo '}' >> /etc/dhcpd.conf"
 	
-	echo "Iniciando servicio DHCP..."
-	
+	echo "Configuracion generada"
+	echo ""
+	echo "Deteniendo servicio previo si existe..."
 	sudo systemctl stop dhcpd.service 2>/dev/null
-	sleep 1
-	sudo systemctl start dhcpd.service
+	sleep 2
 	
-	if [[ $? -eq 0 ]]; then
+	echo "Iniciando servicio DHCP..."
+	sudo systemctl start dhcpd.service
+	sleep 2
+	
+	# Verificar si inició correctamente
+	if systemctl is-active --quiet dhcpd.service; then
 		sudo systemctl enable dhcpd.service
 		echo ""
 		echo "========== Servidor DHCP iniciado =========="
@@ -556,6 +585,7 @@ EOF
 		[[ "$DNS" != "X" ]] && echo "DNS: $DNS"
 		[[ "$DNS2" != "X" ]] && echo "DNS 2: $DNS2"
 		echo "Lease: $LEASE segundos"
+		echo "Interfaz: $interfaz"
 		echo "---------------------------------------------"
 		echo ""
 	else
