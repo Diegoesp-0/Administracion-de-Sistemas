@@ -233,7 +233,6 @@ configurar_ip_estatica(){
 	local interfaz=$3
 	
 	echo ""
-	echo "Configurando IP estatica en la interfaz $interfaz..."
 	echo "IP: $ip"
 	echo "Mascara: $mascara"
 	
@@ -295,7 +294,7 @@ conf_parametros(){
 		clear
 		echo "========== CONFIGURAR PARAMETROS =========="
 		echo "Nombre del ambito: $SCOPE_T"
-		read -p "IP inicial del rango (sera la IP del servidor): " INICIAL_T
+		read -p "IP inicial del rango: " INICIAL_T
 		
 		if ! validar_ip "$INICIAL_T"; then
 			clear
@@ -430,8 +429,6 @@ conf_parametros(){
 	echo "Lease (en segundos): $LEASE_T"
 	echo "---------------------------------------------"
 	
-	echo ""
-	echo "Calculando mascara de subred..."
 	if calcular_mascara "$INICIAL_T" "$FINAL_T"; then
 		echo "Mascara calculada: $mascara"
 		MASCARA_T="$mascara"
@@ -504,26 +501,19 @@ iniciar_servidor(){
 	local interfaz=$(obtener_interfaz "$IPINICIAL")
 	
 	if [[ -z "$interfaz" ]]; then
-		echo "ERROR: No se pudo detectar la interfaz de red"
 		return 1
 	fi
-	
-	echo "Interfaz detectada: $interfaz"
-	echo ""
 	
 	if ! configurar_ip_estatica "$IPINICIAL" "$MASCARA" "$interfaz"; then
 		return 1
 	fi
-	
-	echo ""
-	echo "Generando archivo de configuracion dhcpd.conf..."
 	
 	local ip_reparto=$(incrementar_ip "$IPINICIAL")
 	local red=$(obtener_red "$IPINICIAL")
 	local broadcast=$(obtener_broadcast "$IPINICIAL")
 	
 	sudo tee /etc/dhcpd.conf > /dev/null << EOF
-# Configuracion generada automaticamente
+
 ddns-update-style none;
 authoritative;
 default-lease-time $LEASE;
@@ -549,8 +539,6 @@ EOF
 	
 	sudo bash -c "echo '}' >> /etc/dhcpd.conf"
 	
-	echo "Archivo de configuracion creado"
-	echo ""
 	echo "Iniciando servicio DHCP..."
 	
 	sudo systemctl stop dhcpd.service 2>/dev/null
@@ -560,9 +548,7 @@ EOF
 	if [[ $? -eq 0 ]]; then
 		sudo systemctl enable dhcpd.service
 		echo ""
-		echo "=========================================="
-		echo "Servidor DHCP iniciado correctamente"
-		echo "=========================================="
+		echo "========== Servidor DHCP iniciado =========="
 		echo "IP del servidor: $IPINICIAL"
 		echo "Rango de IPs: $ip_reparto - $IPFINAL"
 		echo "Mascara: $MASCARA"
@@ -570,12 +556,11 @@ EOF
 		[[ "$DNS" != "X" ]] && echo "DNS: $DNS"
 		[[ "$DNS2" != "X" ]] && echo "DNS 2: $DNS2"
 		echo "Lease: $LEASE segundos"
-		echo "=========================================="
+		echo "---------------------------------------------"
 		echo ""
 	else
 		echo ""
 		echo "ERROR: No se pudo iniciar el servidor DHCP"
-		echo "Verifique los logs con: journalctl -xeu dhcpd.service"
 		echo ""
 		return 1
 	fi
@@ -634,24 +619,24 @@ monitor(){
 	
 	trap 'echo ""; echo "Saliendo del monitor..."; exit 0' SIGINT SIGTERM
 	
-	echo "========== MONITOR DHCP - TIEMPO REAL =========="
+	echo "========== MONITOR DHCP =========="
 	echo "Presione Ctrl+C para salir"
 	echo ""
 	sleep 2
 	
 	while true; do
 		clear
-		echo "========== MONITOR DHCP - TIEMPO REAL =========="
+		echo "========== MONITOR DHCP =========="
 		echo "Servidor: $SCOPE"
 		echo "Rango: $(incrementar_ip "$IPINICIAL") - $IPFINAL"
 		echo "Actualizando cada 3 segundos... (Ctrl+C para salir)"
 		echo ""
-		echo "================================================"
+		echo "---------------------------------------"
 		
 		if [[ -f /var/lib/dhcp/db/dhcpd.leases ]]; then
 			echo ""
 			echo "CLIENTES CONECTADOS:"
-			echo "================================================"
+			echo "---------------------------------------"
 			
 			local lease_file="/var/lib/dhcp/db/dhcpd.leases"
 			local ahora=$(date +%s)
@@ -724,7 +709,7 @@ monitor(){
 				rm -f /tmp/dhcp_count.tmp
 			fi
 			
-			echo "================================================"
+			echo "---------------------------------------"
 			echo "Total de clientes activos: $count"
 			echo ""
 		else
@@ -733,9 +718,6 @@ monitor(){
 			echo "Ruta esperada: /var/lib/dhcp/db/dhcpd.leases"
 			echo ""
 		fi
-		
-		echo "Ultima actualizacion: $(date '+%Y-%m-%d %H:%M:%S')"
-		
 		sleep 3
 	done
 }
