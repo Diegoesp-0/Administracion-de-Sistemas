@@ -18,7 +18,6 @@ calcular_mascara(){
    local ipInicial="$1"
    local ipFinal="$2"
    
-   # Convertir IPs a numeros
    _ip2dec() {
       local ip="$1"
       IFS='.' read -r a b c d <<< "$ip"
@@ -44,7 +43,6 @@ calcular_mascara(){
    local diferencia=$((ip2_dec - ip1_dec + 1))
    local hosts_necesarios=$((diferencia + 2))
    
-   #Calcular CIDR por hosts necesarios
    local cidr_hosts=32
    while [[ $cidr_hosts -ge 8 ]]; do
       local bits=$((32 - cidr_hosts))
@@ -60,7 +58,6 @@ calcular_mascara(){
       ((cidr_hosts--))
    done
    
-   #Calcular CIDR por misma subred
    local cidr_subred=32
    while [[ $cidr_subred -ge 8 ]]; do
       local mascara_tmp=0
@@ -110,22 +107,18 @@ calcular_mascara(){
 validar_ip(){
 	local ip=$1
 	
-	if [[ ! $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
-	then
+	if [[ ! $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
 		return 1
 	fi
 	
 	IFS='.' read -r p1 p2 p3 p4 <<< "$ip"
 
-	for p in $p1 $p2 $p3 $p4
-	do	
+	for p in $p1 $p2 $p3 $p4; do
 		[[ $p -le 255 ]] || return 1
 	done
 
 	[[ $p1 -eq 0 && $p2 -eq 0 && $p3 -eq 0 && $p4 -eq 0 ]] && return 1
-
 	[[ $p1 -eq 255 && $p2 -eq 255 && $p3 -eq 255 && $p4 -eq 255 ]] && return 1
-
 	[[ $p1 -eq 127 ]] && return 1
 
 	return 0
@@ -149,7 +142,7 @@ validar_rango(){
 	n_inicio=$(ip_a_numero "$ip_inicio")
 	n_fin=$(ip_a_numero "$ip_fin")
 
-	[[ $n_inicio -lt $n_fin ]]	
+	[[ $n_inicio -lt $n_fin ]]
 }
 
 validar_dns(){
@@ -244,11 +237,10 @@ configurar_ip_estatica(){
 	echo "IP: $ip"
 	echo "Mascara: $mascara"
 	
-	# Calcular CIDR desde mascara
 	IFS='.' read -r m1 m2 m3 m4 <<< "$mascara"
 	local mascara_bin=""
 	for octet in $m1 $m2 $m3 $m4; do
-		mascara_bin+=$(echo "obase=2; $octet" | bc | awk '{printf "%08d", $0}')
+		mascara_bin+=$(printf "%08d" $(echo "obase=2; $octet" | bc 2>/dev/null || echo "0"))
 	done
 	local cidr=$(echo "$mascara_bin" | tr -cd '1' | wc -c)
 	
@@ -268,8 +260,7 @@ configurar_ip_estatica(){
 
 verificar(){
 	clear
-	if zypper se -i dhcp-server > /dev/null 2>&1
-	then
+	if zypper se -i dhcp-server > /dev/null 2>&1; then
 		echo ""
 		echo "DHCP-SERVER esta instalado :D"
 		echo ""
@@ -279,11 +270,10 @@ verificar(){
 		echo ""
 		read -p "Desea descargar DHCP-SERVER? (S/s): " OPC
 
-		if [ "$OPC" = "S" ] || [ "$OPC" = "s" ]
-		then
+		if [ "$OPC" = "S" ] || [ "$OPC" = "s" ]; then
 			echo "Descargando..."
 			sudo zypper install -y dhcp-server
-		fi		 
+		fi
 	fi
 }
 
@@ -298,18 +288,16 @@ conf_parametros(){
 		return 1
 	fi
 	
-	echo "========== CONFIGURAR PARAMETROS ========== "
+	echo "========== CONFIGURAR PARAMETROS =========="
 	read -p "Nombre del ambito: " SCOPE_T
 	
-	while true
-	do
+	while true; do
 		clear
 		echo "========== CONFIGURAR PARAMETROS =========="
 		echo "Nombre del ambito: $SCOPE_T"
 		read -p "IP inicial del rango (sera la IP del servidor): " INICIAL_T
 		
-		if ! validar_ip "$INICIAL_T"
-		then	
+		if ! validar_ip "$INICIAL_T"; then
 			clear
 			echo "La IP inicial no es valida"
 			sleep 2
@@ -318,26 +306,23 @@ conf_parametros(){
 
 		read -p "IP final del rango: " FINAL_T
 		
-		if ! validar_ip "$FINAL_T"
-		then
+		if ! validar_ip "$FINAL_T"; then
 			clear
 			echo "La IP final no es valida"
 			sleep 2
 			continue
 		fi
 
-		if ! validar_rango "$INICIAL_T" "$FINAL_T"	
-		then 
+		if ! validar_rango "$INICIAL_T" "$FINAL_T"; then
 			clear
 			echo "La IP inicial debe ser menor a la IP final"
 			sleep 2
 			continue
-		fi	
+		fi
 		break
-	done		
+	done
 	
-	while true
-	do 
+	while true; do
 		clear
 		echo "========== CONFIGURAR PARAMETROS =========="
 		echo "Nombre del ambito: $SCOPE_T"
@@ -350,19 +335,17 @@ conf_parametros(){
 			break
 		fi
 		
-		if validar_gateway "$GATEWAY_T" "$INICIAL_T" >/dev/null 2>&1
-		then
+		if validar_gateway "$GATEWAY_T" "$INICIAL_T" >/dev/null 2>&1; then
 			break
 		else
 			clear
 			echo "Gateway invalido..."
-			sleep 2			
+			sleep 2
 		fi
-	done		
+	done
 	clear
 	
-	while true
-	do
+	while true; do
 		clear
 		echo "========== CONFIGURAR PARAMETROS =========="
 		echo "Nombre del ambito: $SCOPE_T"
@@ -377,8 +360,7 @@ conf_parametros(){
 			break
 		fi
 
-		if ! validar_dns "$DNS_T"
-		then
+		if ! validar_dns "$DNS_T"; then
 			clear
 			echo "DNS primario invalido..."
 			sleep 2
@@ -394,22 +376,19 @@ conf_parametros(){
 		echo "DNS primario: $DNS_T"
 		read -p "DNS secundario (Enter para omitir): " DNS2_T
 
-		if [[ -z "$DNS2_T" ]]
-		then
+		if [[ -z "$DNS2_T" ]]; then
 			DNS2_T="X"
 			break
 		fi
 
-		if ! validar_dns "$DNS2_T"
-		then
+		if ! validar_dns "$DNS2_T"; then
 			clear
 			echo "DNS secundario invalido..."
 			sleep 2
 			continue
 		fi
 		
-		if [[ "$DNS_T" == "$DNS2_T" ]]
-		then
+		if [[ "$DNS_T" == "$DNS2_T" ]]; then
 			clear
 			echo "El DNS secundario no puede ser igual al primario..."
 			sleep 2
@@ -419,8 +398,7 @@ conf_parametros(){
 		break
 	done
 
-	while true
-	do
+	while true; do
 		clear
 		echo "========== CONFIGURAR PARAMETROS =========="
 		echo "Nombre del ambito: $SCOPE_T"
@@ -432,8 +410,7 @@ conf_parametros(){
 		
 		read -p "Lease (en segundos): " LEASE_T
 		
-		if ! validar_lease "$LEASE_T"
-		then
+		if ! validar_lease "$LEASE_T"; then
 			clear
 			echo "Lease invalido..."
 			sleep 2
@@ -479,14 +456,13 @@ conf_parametros(){
 
 ver_parametros(){
 	clear
-	if [ "$SCOPE" = "X" ] || [ "$IPINICIAL" = "X" ] || [ "$IPFINAL" = "X" ] || [ "$LEASE" = "X" ]
-	then	
+	if [ "$SCOPE" = "X" ] || [ "$IPINICIAL" = "X" ] || [ "$IPFINAL" = "X" ] || [ "$LEASE" = "X" ]; then
 		echo ""
 		echo "Parametros no asignados..."
 		echo ""
 	else
 		echo "========== PARAMETROS CONFIGURADOS =========="
-		echo "SCOPE = $SCOPE"	
+		echo "SCOPE = $SCOPE"
 		echo "IP INICIAL = $IPINICIAL (IP del servidor)"
 		
 		local ip_reparto=$(incrementar_ip "$IPINICIAL")
@@ -546,7 +522,7 @@ iniciar_servidor(){
 	local red=$(obtener_red "$IPINICIAL")
 	local broadcast=$(obtener_broadcast "$IPINICIAL")
 	
-	sudo bash -c "cat > /etc/dhcpd.conf << 'EOF'
+	sudo tee /etc/dhcpd.conf > /dev/null << EOF
 # Configuracion generada automaticamente
 ddns-update-style none;
 authoritative;
@@ -557,7 +533,7 @@ subnet $red netmask $MASCARA {
     range $ip_reparto $IPFINAL;
     option subnet-mask $MASCARA;
     option broadcast-address $broadcast;
-EOF"
+EOF
 
 	if [[ "$GATEWAY" != "X" ]]; then
 		sudo bash -c "echo '    option routers $GATEWAY;' >> /etc/dhcpd.conf"
@@ -656,15 +632,13 @@ monitor(){
 		return 1
 	fi
 	
-	# Configurar trap para capturar Ctrl+C
-	trap 'echo -e "\n\nSaliendo del monitor..."; exit 0' SIGINT SIGTERM
+	trap 'echo ""; echo "Saliendo del monitor..."; exit 0' SIGINT SIGTERM
 	
 	echo "========== MONITOR DHCP - TIEMPO REAL =========="
 	echo "Presione Ctrl+C para salir"
 	echo ""
 	sleep 2
 	
-	# Loop infinito hasta Ctrl+C
 	while true; do
 		clear
 		echo "========== MONITOR DHCP - TIEMPO REAL =========="
@@ -718,15 +692,13 @@ monitor(){
 		
 		echo "Ultima actualizacion: $(date '+%Y-%m-%d %H:%M:%S')"
 		
-		# Sleep de 3 segundos - puede interrumpirse con Ctrl+C
 		sleep 3
 	done
 }
 
 # ============= COMANDOS ===================================================
 
-if [ "$1" = "help" ]
-then
+if [ "$1" = "help" ]; then
 	echo ""
 	echo "============ COMANDOS ============"
 	echo "verificar       : Verificar si esta instalado DHCP-SERVER"
@@ -738,32 +710,26 @@ then
 	echo ""
 fi
 
-if [ "$1" = "verificar" ]
-then
+if [ "$1" = "verificar" ]; then
 	verificar
-fi 
+fi
 
-if [ "$1" = "parametros" ]
-then
+if [ "$1" = "parametros" ]; then
 	ver_parametros
 fi
 
-if [ "$1" = "parametrosconf" ]
-then
+if [ "$1" = "parametrosconf" ]; then
 	conf_parametros
 fi
 
-if [ "$1" = "iniciar" ]
-then
+if [ "$1" = "iniciar" ]; then
 	iniciar_servidor
 fi
 
-if [ "$1" = "detener" ]
-then
+if [ "$1" = "detener" ]; then
 	detener_servidor
 fi
 
-if [ "$1" = "monitor" ]
-then
+if [ "$1" = "monitor" ]; then
 	monitor
 fi
