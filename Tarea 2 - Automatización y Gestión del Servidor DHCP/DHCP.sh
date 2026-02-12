@@ -509,9 +509,7 @@ iniciar_servidor(){
 	if ! configurar_ip_estatica "$IPINICIAL" "$MASCARA" "$interfaz"; then
 		return 1
 	fi
-	
 	echo ""
-	echo "Configurando interfaz DHCP en el sistema..."
 	
 	# Configurar la interfaz en /etc/sysconfig/dhcpd
 	if [[ -f /etc/sysconfig/dhcpd ]]; then
@@ -525,8 +523,6 @@ DHCPD_OTHER_ARGS=\"\"
 DHCPD_RUN_CHROOTED=\"no\"
 EOF"
 	fi
-	
-	echo "Generando configuracion DHCP..."
 	
 	local ip_reparto=$(incrementar_ip "$IPINICIAL")
 	local red=$(obtener_red "$IPINICIAL")
@@ -563,9 +559,6 @@ EOF
 	
 	sudo bash -c "echo '}' >> /etc/dhcpd.conf"
 	
-	echo "Configuracion generada"
-	echo ""
-	echo "Deteniendo servicio previo si existe..."
 	sudo systemctl stop dhcpd.service 2>/dev/null
 	sleep 2
 	
