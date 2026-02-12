@@ -234,11 +234,11 @@ clear
 	if zypper se -i dhcp-server > /dev/null 2>&1
 	then
 		echo ""
-		echo "SHCP-SERVER esta instalado :D"
+		echo "DHCP-SERVER esta instalado :D"
 		echo ""
 	else
 		echo ""
-		echo "El paquete SHCP-SERVER no esta instalado"
+		echo "El paquete DHCP-SERVER no esta instalado"
 		echo ""
 		read -p "Desea descargar DHCP-SERVER? (S/s): " OPC
 
