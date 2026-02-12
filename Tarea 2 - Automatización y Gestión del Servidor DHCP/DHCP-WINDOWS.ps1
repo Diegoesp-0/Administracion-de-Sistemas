@@ -41,22 +41,6 @@ function Red-Base([string]$ip, [string]$mask = "") {
     $p = $ip.Split('.'); return "$($p[0]).$($p[1]).$($p[2]).0"
 }
 
-function Calcular-Mascara([string]$ini, [string]$fin) {
-    $n1 = IP-Num $ini; $n2 = IP-Num $fin
-    if ($n2 -le $n1) { return $null }
-    for ($cidr = 32; $cidr -ge 8; $cidr--) {
-        $m = [uint32](([uint32]0xFFFFFFFF -shl (32 - $cidr)) -band [uint32]0xFFFFFFFF)
-        if (([uint32]$n1 -band $m) -eq ([uint32]$n2 -band $m)) {
-            if (($n2 - $n1 + 1) -le ([math]::Pow(2, 32-$cidr) - 2)) {
-                $bytes = [System.BitConverter]::GetBytes($m)
-                [Array]::Reverse($bytes)
-                return ($bytes -join '.')
-            }
-        }
-    }
-    return $null
-}
-
 function Calcular-CIDR([string]$mask) {
     $cidr = 0
     foreach ($b in ([System.Net.IPAddress]::Parse($mask)).GetAddressBytes()) {
@@ -182,8 +166,19 @@ function Menu-Parametros {
     }
 
     # Mascara automatica
-    $msk = Calcular-Mascara $ini $fin
-    if (-not $msk) { Write-Host "Error al calcular la mascara."; Pausa; return }
+    # Mascara fija /24 (estable y correcta para 192.168.x.x)
+$msk = "255.255.255.0"
+
+# Validar que ambas IP esten en la misma red /24
+$redIni = Red-Base $ini $msk
+$redFin = Red-Base $fin $msk
+
+if ($redIni -ne $redFin) {
+    Write-Host "ERROR: Las IP no pertenecen a la misma red /24."
+    Pausa
+    return
+}
+
 
     # Guardar
     $script:SCOPE=$sc; $script:IPINICIAL=$ini; $script:IPFINAL=$fin
