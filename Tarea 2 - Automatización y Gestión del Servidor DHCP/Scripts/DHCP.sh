@@ -12,6 +12,134 @@ LEASE=5000
 MASCARA=X
 
 #  =============== FUNCIONES =============================================
+
+calcular_mascara(){
+   local ipInicial="$1"
+   local ipFinal="$2"
+   
+   echo "Calculando mascara de subred para el rango $ipInicial - $ipFinal..."
+   
+   # Convertir IPs a números
+   _ip2dec() {
+      local ip="$1"
+      IFS='.' read -r a b c d <<< "$ip"
+      echo $(( (a * 256 * 256 * 256) + (b * 256 * 256) + (c * 256) + d ))
+   }
+   
+   _dec2ip() {
+      local dec="$1"
+      local o1=$(( (dec / (256 * 256 * 256)) % 256 ))
+      local o2=$(( (dec / (256 * 256)) % 256 ))
+      local o3=$(( (dec / 256) % 256 ))
+      local o4=$(( dec % 256 ))
+      echo "$o1.$o2.$o3.$o4"
+   }
+   
+   local ip1_dec=$(_ip2dec "$ipInicial")
+   local ip2_dec=$(_ip2dec "$ipFinal")
+   
+   if [[ $ip2_dec -lt $ip1_dec ]]; then
+      echo "ERROR: IP final menor que IP inicial"
+      return 1
+   fi
+   
+   local diferencia=$((ip2_dec - ip1_dec + 1))
+   echo "IPs en el rango: $diferencia"
+   
+   local hosts_necesarios=$((diferencia + 2))
+   echo "Hosts necesarios: $hosts_necesarios"
+   
+   #Calcular CIDR por hosts necesarios
+   local cidr_hosts=32
+   while [[ $cidr_hosts -ge 8 ]]; do
+      # Calcular 2^(32-cidr) sin operadores <<
+      local bits=$((32 - cidr_hosts))
+      local potencia=1
+      for ((i=0; i<bits; i++)); do
+         potencia=$((potencia * 2))
+      done
+      local hosts_disponibles=$((potencia - 2))
+      
+      if [[ $hosts_necesarios -le $hosts_disponibles ]]; then
+         break
+      fi
+      ((cidr_hosts--))
+   done
+   
+   #Calcular CIDR por misma subred
+   local cidr_subred=32
+   while [[ $cidr_subred -ge 8 ]]; do
+      # Calcular máscara sin operadores <<
+      local mascara_tmp=0
+      # Poner 1's en los primeros cidr_subred bits
+      for ((i=0; i<cidr_subred; i++)); do
+         mascara_tmp=$(( (mascara_tmp * 2) + 1 ))
+      done
+      # Poner 0's en los bits restantes
+      for ((i=cidr_subred; i<32; i++)); do
+         mascara_tmp=$((mascara_tmp * 2))
+      done
+      
+      local red1=$(( ip1_dec & mascara_tmp ))
+      local red2=$(( ip2_dec & mascara_tmp ))
+      if [[ $red1 -eq $red2 ]]; then
+         break
+      fi
+      ((cidr_subred--))
+   done
+   
+   #Elegir el CIDR que cumpla AMBAS condiciones
+   local cidr_final=$(( cidr_hosts < cidr_subred ? cidr_hosts : cidr_subred ))
+   
+   echo "CIDR necesario por hosts: /$cidr_hosts"
+   echo "CIDR necesario por subred: /$cidr_subred"
+   echo "CIDR final seleccionado: /$cidr_final"
+   
+   local mascara_dec=0
+   # Poner 1's en los primeros cidr_final bits
+   for ((i=0; i<cidr_final; i++)); do
+      mascara_dec=$(( (mascara_dec * 2) + 1 ))
+   done
+   # Poner 0's en los bits restantes
+   for ((i=cidr_final; i<32; i++)); do
+      mascara_dec=$((mascara_dec * 2))
+   done
+   
+   mascara=$(_dec2ip "$mascara_dec")
+   
+   # Calcular hosts disponibles sin operadores <<
+   local bits_final=$((32 - cidr_final))
+   local hosts_potencia=1
+   for ((i=0; i<bits_final; i++)); do
+      hosts_potencia=$((hosts_potencia * 2))
+   done
+   local hosts_finales=$((hosts_potencia - 2))
+   
+   echo "Máscara calculada: $mascara (CIDR: /$cidr_final)"
+   echo "Hosts disponibles: $hosts_finales"
+   
+   # Verificar si el rango cabe en la subred
+   local red_base=$(( ip1_dec & mascara_dec ))
+   
+   # Calcular broadcast sin operadores <<
+   local broadcast=$(( (~mascara_dec) & 0x7FFFFFFF ))
+   # Ajustar para 32 bits
+   if [[ $mascara_dec -gt 0 ]]; then
+      broadcast=$(( red_base | (0xFFFFFFFF & ~mascara_dec) ))
+   else
+      broadcast=0xFFFFFFFF
+   fi
+   
+   if [[ $ip1_dec -lt $red_base || $ip2_dec -gt $broadcast ]]; then
+      echo "  ERROR: El rango no cabe en la subred $(_dec2ip "$red_base")/$cidr_final"
+      echo "  - Broadcast de la subred: $(_dec2ip "$broadcast")"
+    return 1
+   fi
+   
+   echo "Mascara de subred determinada: $mascara"
+   return 0
+   }
+
 validar_ip(){
 	local ip=$1
 	
