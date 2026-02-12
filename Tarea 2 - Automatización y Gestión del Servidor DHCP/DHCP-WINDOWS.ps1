@@ -242,7 +242,6 @@ function Menu-Iniciar {
 
         Set-Service DHCPServer -StartupType Automatic
         Start-Service DHCPServer
-        Add-DhcpServerInDC -ErrorAction SilentlyContinue
 
         Write-Host "`nServidor DHCP iniciado correctamente."
         Write-Host "Red base     : $scopeReal"
