@@ -63,27 +63,28 @@ configurar_zona(){
 		
 	else
 		clear
-		cat >> /etc/named.conf <<EOF
-			zone "reprobados.com" {
-				type master;
-				file "/var/lib/named/db.reprobados.com"
-			};
+cat >> /etc/named.conf <<EOF
+zone "reprobados.com" {
+	type master;
+	file "/var/lib/named/db.reprobados.com";
+};
 EOF
 	fi
 
-	cat > /var/lib/named/db.reprobados.com <<EOF	
-	\$TTL 604800
-	@	IN	SOA ns1.reprobados.com. admin.reprobados.com. (
-				2024010101 ; Serial
-				604800	   ; Refresh
-				86400	   ; Retry
-				2419200	   ; Expire
-				604800	   ; Negative TTL
+cat > /var/lib/named/db.reprobados.com <<EOF	
+\$TTL 604800
+@	IN	SOA ns1.reprobados.com. admin.reprobados.com. (
+	2024010101 ; Serial
+	604800	   ; Refresh
+	86400	   ; Retry
+	2419200	   ; Expire
+	604800)	   ; Negative TTL
 
-	@	IN	NS	ns1.reprobados.com.
-	ns1	IN	A	$IP_SERVER
-	@	IN 	A	$IP_CLIENTE	
-	www	IN	CNAME	@
+
+@	IN	NS	ns1.reprobados.com.
+ns1	IN	A	$IP_SERVER
+@	IN 	A	$IP_CLIENTE	
+www	IN	CNAME	@
 EOF
 
 	sudo systemctl restart named
@@ -115,7 +116,7 @@ if [ "$1" = "iniciar" ]; then
 	iniciar
 fi
 
-if [ "$1 = "configurar" ]; then
+if [ "$1" = "configurar" ]; then
 	configurar_zona
 fi
 
