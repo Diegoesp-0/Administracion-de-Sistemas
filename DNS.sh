@@ -6,6 +6,7 @@ verificar(){
 		echo ""
 		echo "BIND ya esta instalado :D"
 		echo ""
+		sleep 2
 	else
 		echo ""
 		echo "BIND no esta instalado"
@@ -104,6 +105,8 @@ www	IN	CNAME	@
 EOF
 
 	sudo systemctl restart named
+	sudo firewall-cmd --add-service=dns --permanent
+	sudo firewall-cmd --reload
 	echo ""
 	echo "Zona configurada y servicio reiniciado..."
 
