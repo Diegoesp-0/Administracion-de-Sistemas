@@ -175,6 +175,15 @@ validar_ip_fija(){
 		sleep 2
 	fi
 }
+arroz(){
+	local -n _ARR=$1
+	local NUEVA_LISTA="	local DOMINIOS=("
+	for d in "${_ARR[@]}"; do
+		NUEVA_LISTA+="\"$d\" "
+	done
+	NUEVA_LISTA="${NUEVA_LISTA% })"
+	sed -i "s|^\tlocal DOMINIOS=(.*|${NUEVA_LISTA}|" "$(realpath "$0")"
+}
 menu(){
 	local DOMINIOS=("reprobados.com")
 
@@ -183,6 +192,8 @@ menu(){
 		echo "========================================="
 		echo "         SELECCIONAR DOMINIO"
 		echo "========================================="
+		echo ""
+		echo "  Dominio activo: $DOMINIO"
 		echo ""
 		for i in "${!DOMINIOS[@]}"
 		do
@@ -205,7 +216,6 @@ menu(){
 				sleep 2
 				continue
 			fi
-			
 			local DUPLICADO=0
 			for d in "${DOMINIOS[@]}"; do
 				if [ "$d" = "$NUEVO_DOM" ]; then
@@ -218,12 +228,14 @@ menu(){
 				sleep 2
 			else
 				DOMINIOS+=("$NUEVO_DOM")
+				arroz DOMINIOS
 				echo "Dominio [$NUEVO_DOM] agregado..."
 				sleep 2
 			fi
 
 		elif [[ "$OPC_DOM" =~ ^[0-9]+$ ]] && [ "$OPC_DOM" -ge 1 ] && [ "$OPC_DOM" -le "${#DOMINIOS[@]}" ]; then
 			DOMINIO="${DOMINIOS[$((OPC_DOM-1))]}"
+			sed -i "s/^DOMINIO=.*/DOMINIO=\"$DOMINIO\"/" "$(realpath "$0")"
 			echo ""
 			echo "Dominio seleccionado: $DOMINIO"
 			sleep 2
