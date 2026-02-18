@@ -528,11 +528,9 @@ EOF"
 	local red=$(obtener_red "$IPINICIAL")
 	local broadcast=$(obtener_broadcast "$IPINICIAL")
 	
-	# Crear directorio de leases si no existe
 	sudo mkdir -p /var/lib/dhcp/db
 	sudo touch /var/lib/dhcp/db/dhcpd.leases
 	
-	# Generar configuración
 	sudo tee /etc/dhcpd.conf > /dev/null << EOF
 ddns-update-style none;
 authoritative;
@@ -566,7 +564,7 @@ EOF
 	sudo systemctl start dhcpd.service
 	sleep 2
 	
-	# Verificar si inició correctamente
+
 	if systemctl is-active --quiet dhcpd.service; then
 		sudo systemctl enable dhcpd.service
 		echo ""
@@ -697,7 +695,7 @@ monitor(){
 			}
 			/binding state active/ {
 				if (ip != "" && mac != "") {
-					# Verificar si el lease ha expirado
+					
 					activo = 0
 					if (ends == "never") {
 						activo = 1
