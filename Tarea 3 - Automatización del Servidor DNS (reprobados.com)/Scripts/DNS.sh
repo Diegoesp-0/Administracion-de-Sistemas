@@ -189,9 +189,7 @@ menu(){
 
 	while true; do
 		clear
-		echo "========================================="
-		echo "         SELECCIONAR DOMINIO"
-		echo "========================================="
+		echo "======= SELECCIONAR DOMINIO ======="
 		echo ""
 		echo "  Dominio activo: $DOMINIO"
 		echo ""
