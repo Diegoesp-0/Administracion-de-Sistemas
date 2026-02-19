@@ -51,7 +51,7 @@ iniciar(){
 }
 configurar_zona(){
 	clear
-	IP_SERVER=$(ip -4 addr show | grep "192.168" | awk '{print $2}' | cut -d/ -f1)
+	IP_SERVER=$(ip -4 addr show | grep "inet " | grep -v "127.0.0.1" | awk '{print $2}' | cut -d/ -f1 | head -n1)
 	
 while true; do
 	echo "=============== IP CLIENTE =============="
