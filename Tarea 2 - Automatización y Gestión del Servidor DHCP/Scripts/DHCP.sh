@@ -354,7 +354,7 @@ conf_parametros(){
 		read -p "DNS primario (Enter para omitir): " DNS_T
 
 		if [[ -z "$DNS_T" ]]; then
-			DNS_T="X"
+			DNS_T="$INICIAL_T"
 			DNS2_T="X"
 			break
 		fi
