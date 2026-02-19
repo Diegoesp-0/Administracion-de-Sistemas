@@ -106,7 +106,7 @@ function Validar-IPFija {
 
 function Configurar-Zona {
     Clear-Host
-    $IP_SERVER = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -match "^192\.168\." } | Select-Object -First 1).IPAddress
+    $IP_SERVER = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notmatch "^127\." } | Select-Object -First 1).IPAddress
 
     do {
         Write-Host "=============== IP CLIENTE =============="
