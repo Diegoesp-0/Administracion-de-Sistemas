@@ -1,5 +1,8 @@
 #!/bin/bash
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/funciones_comunes.sh"
+
 calcular_Rango() {
     local ip1=$1
     local ip2=$2
@@ -23,10 +26,10 @@ calcular_Rango() {
 
 calcular_Bits() {
     local masc="$1"
-    count=0
+    local count=0
     IFS='.' read -r a b c d <<< "$masc"
     for octeto in $d $c $b $a; do
-        n=255
+        local n=255
         if [ $octeto -eq 0 ]; then
             count=$(( count + 8 ))
             continue
@@ -53,7 +56,7 @@ validar_IP_Masc() {
     mascRang=$(calcular_Bits "$mascRang")
     mascRang=$(( (2 ** mascRang) - 2 ))
     if [ $rango -gt $mascRang ]; then
-        echo "La mascara $3 no es suficiente para el rango de IPs que desea asignar"
+        echo "La mascara $3 no es suficiente para el rango de IPs indicado"
         return 1
     fi
     return 0
@@ -93,14 +96,14 @@ crear_Mascara() {
     done
 
     IFS=" "
-    octeto="${a_masc[*]}"
-    octeto=${octeto// /.}
-    echo "$octeto"
+    local resultado="${a_masc[*]}"
+    resultado=${resultado// /.}
+    echo "$resultado"
 }
 
 verificar_dhcp() {
     echo "Verificando paqueteria DHCP..."
-    if paquete_instalado dhcp-server; then
+    if rpm -q dhcp-server &>/dev/null; then
         echo "DHCP esta instalado"
         return 0
     else
@@ -109,41 +112,37 @@ verificar_dhcp() {
     fi
 }
 
-instalar_DHCP() {
-    echo "=== Instalacion y Configuracion de DHCP Server ==="
-    echo ""
-
-    if paquete_instalado dhcp-server; then
-        echo "DHCP server ya esta instalado"
-    else
-        echo "DHCP server no esta instalado, iniciando instalacion..."
-        sudo zypper --non-interactive --quiet install dhcp-server > /dev/null 2>&1 &
-        pid=$!
-        echo "Instalando, espere..."
-        wait $pid
-        if [ $? -eq 0 ]; then
-            echo "DHCP server instalado correctamente"
+instalar_dhcp() {
+    if verificar_dhcp; then
+        if [ -f /etc/dhcpd.conf ] && [ -s /etc/dhcpd.conf ]; then
+            echo "Se detecto una configuracion previa de DHCP"
+            read -p "Deseas sobreescribir la configuracion existente? (y/n): " sobreescribir
+            if [[ "$sobreescribir" =~ ^[Yy]$ ]]; then
+                configurar_dhcp
+            else
+                echo "Operacion cancelada"
+            fi
         else
-            echo "Error en la instalacion de DHCP"
-            return 1
+            echo "DHCP ya instalado pero sin configuracion. Iniciando configuracion..."
+            configurar_dhcp
         fi
+        return 0
     fi
 
-    echo ""
+    instalar_paquete "dhcp-server" || return 1
 
     if [ -f /etc/dhcpd.conf ] && [ -s /etc/dhcpd.conf ]; then
         echo "Se detecto una configuracion previa de DHCP"
         read -p "Deseas sobreescribir la configuracion existente? (y/n): " sobreescribir
         if [[ "$sobreescribir" =~ ^[Yy]$ ]]; then
-            configurar_DHCP
-        else
-            echo "Volviendo..."
+            configurar_dhcp
         fi
-        return 0
+    else
+        configurar_dhcp
     fi
 }
 
-configurar_DHCP() {
+configurar_dhcp() {
     local ip_Valida=""
     local uso_Mas=""
     local comp=""
@@ -168,19 +167,17 @@ configurar_DHCP() {
     done
 
     until [ "$ip_Valida" = "si" ]; do
-        read -p "Rango inicial de la IP (La primera IP se usara para asignarla al servidor): " ip_Inicial
-        ip_Res=$(echo "$ip_Inicial" | cut -d'.' -f4)
-        if [ $ip_Res -ne 255 ]; then
-            ip_Servidor="$ip_Inicial"
-            ip_Res=$(( ip_Res + 1 ))
-            ip_Inicial=$(echo "$ip_Inicial" | cut -d'.' -f1-3)
-            ip_Inicial="$ip_Inicial.$ip_Res"
-            if validar_IP "$ip_Inicial"; then
+        read -p "IP del servidor (esta IP se asignara de forma estatica al servidor): " ip_Servidor
+        local ip_Res=$(echo "$ip_Servidor" | cut -d'.' -f4)
+        if [ "$ip_Res" -ne 255 ]; then
+            if validar_IP "$ip_Servidor"; then
                 ip_Valida="si"
+                local ip_Res_Inicial=$(( ip_Res + 1 ))
+                local ip_Prefijo=$(echo "$ip_Servidor" | cut -d'.' -f1-3)
+                ip_Inicial="$ip_Prefijo.$ip_Res_Inicial"
             fi
         else
-            echo "No use X.X.X.255 como ultimo octeto por temas de rendimiento"
-            echo "Intentando nuevamente..."
+            echo "No use X.X.X.255 como ultimo octeto"
         fi
     done
 
@@ -189,7 +186,7 @@ configurar_DHCP() {
     until [ "$ip_Valida" = "si" ]; do
         read -p "Rango final de la IP: " ip_Final
         if validar_IP "$ip_Final"; then
-            if [ $(calcular_Rango "$ip_Inicial" "$ip_Final") -gt 2 ]; then
+            if [ "$(calcular_Rango "$ip_Inicial" "$ip_Final")" -gt 2 ]; then
                 if [ "$uso_Mas" = "si" ]; then
                     if validar_IP_Masc "$ip_Inicial" "$ip_Final" "$mascara"; then
                         ip_Valida="si"
@@ -199,13 +196,15 @@ configurar_DHCP() {
                     ip_Valida="si"
                 fi
             else
-                echo "La IP no concuerda con el rango inicial"
+                echo "La IP final no concuerda con el rango inicial"
             fi
         fi
-        [ "$ip_Valida" = "no" ] && echo "Intentando nuevamente..."
+        if [ "$ip_Valida" = "no" ]; then
+            echo "Intentando nuevamente..."
+        fi
     done
 
-    read -p "Tiempo de la sesion (segundos): " lease_Time
+    read -p "Tiempo de la sesion en segundos: " lease_Time
 
     comp="no"
     until [[ "$comp" = "si" ]]; do
@@ -216,7 +215,9 @@ configurar_DHCP() {
         elif validar_IP "$gateway"; then
             comp="si"
         fi
-        [ "$comp" = "no" ] && echo "Intentando nuevamente..."
+        if [ "$comp" = "no" ]; then
+            echo "Intentando nuevamente..."
+        fi
     done
 
     comp="no"
@@ -228,7 +229,9 @@ configurar_DHCP() {
         elif validar_IP "$dns"; then
             comp="si"
         fi
-        [ "$comp" = "no" ] && echo "Intentando nuevamente..."
+        if [ "$comp" = "no" ]; then
+            echo "Intentando nuevamente..."
+        fi
     done
 
     if [ -n "$dns" ]; then
@@ -240,7 +243,9 @@ configurar_DHCP() {
             elif validar_IP "$dns_Alt"; then
                 comp="si"
             fi
-            [ "$comp" = "no" ] && echo "Intentando nuevamente..."
+            if [ "$comp" = "no" ]; then
+                echo "Intentando nuevamente..."
+            fi
         done
     else
         dns_Alt=""
@@ -249,13 +254,14 @@ configurar_DHCP() {
     echo ""
     echo "Interfaces de red disponibles:"
     ip -br link show | grep -v "lo" | awk '{print $1}'
-    read -p "Ingrese la interfaz de red a usar (ej: enp0s8): " interfaz
+    read -p "Ingrese la interfaz de red a usar: " interfaz
 
     echo ""
     echo "La configuracion final es:"
     echo "Nombre del ambito: $scope"
     echo "Mascara: $mascara"
-    echo "IP inicial: $ip_Inicial"
+    echo "IP del servidor: $ip_Servidor"
+    echo "IP inicial del rango DHCP: $ip_Inicial"
     echo "IP final: $ip_Final"
     echo "Tiempo de concesion: $lease_Time"
     echo "Gateway: $gateway"
@@ -266,17 +272,26 @@ configurar_DHCP() {
 
     read -p "Acepta esta configuracion? (y/n): " opc
     if [ "$opc" = "y" ]; then
-        IFS='.' read -r a b c d <<< "$ip_Inicial"
-        IFS='.' read -r ma mb mc md <<< "$mascara"
+        _aplicar_configuracion_dhcp
+    else
+        echo "Volviendo a configurar..."
+        configurar_dhcp
+    fi
+}
 
-        red="$((a & ma)).$((b & mb)).$((c & mc)).$((d & md))"
-        broadcast="$((a | (255 - ma))).$((b | (255 - mb))).$((c | (255 - mc))).$((d | (255 - md)))"
+_aplicar_configuracion_dhcp() {
+    IFS='.' read -r a b c d <<< "$ip_Inicial"
+    IFS='.' read -r ma mb mc md <<< "$mascara"
 
-        echo "Red calculada: $red"
-        echo "Broadcast calculado: $broadcast"
-        echo "Creando configuracion DHCP..."
+    local red="$((a & ma)).$((b & mb)).$((c & mc)).$((d & md))"
+    local broadcast="$((a | (255 - ma))).$((b | (255 - mb))).$((c | (255 - mc))).$((d | (255 - md)))"
 
-sudo bash -c "cat > /etc/dhcpd.conf" << EOF
+    echo "Red calculada: $red"
+    echo "Broadcast calculado: $broadcast"
+
+    echo "Creando configuracion DHCP..."
+
+    cat > /etc/dhcpd.conf <<EOF
 default-lease-time $lease_Time;
 max-lease-time $((lease_Time * 2));
 authoritative;
@@ -294,38 +309,35 @@ fi)
 }
 EOF
 
-        echo "Configurando interfaz de red..."
-        sudo bash -c "echo 'DHCPD_INTERFACE=\"$interfaz\"' > /etc/sysconfig/dhcpd"
+    echo "Configurando interfaz de red..."
+    echo "DHCPD_INTERFACE=\"$interfaz\"" > /etc/sysconfig/dhcpd
 
-        echo "Configurando IP estatica $ip_Servidor en la interfaz $interfaz..."
-        sudo ip addr flush dev $interfaz
-        sudo ip addr add $ip_Servidor/$(calcular_Bits "$mascara") dev $interfaz
-        sudo ip link set $interfaz up
+    echo "Configurando IP estatica $ip_Servidor en la interfaz $interfaz..."
+    ip addr flush dev "$interfaz"
+    ip addr add "$ip_Servidor/$(calcular_Bits "$mascara")" dev "$interfaz"
+    ip link set "$interfaz" up
 
-sudo bash -c "cat > /etc/sysconfig/network/ifcfg-$interfaz" << EOF
+    cat > "/etc/sysconfig/network/ifcfg-$interfaz" <<EOF
 BOOTPROTO='static'
 STARTMODE='auto'
 IPADDR='$ip_Servidor'
 NETMASK='$mascara'
 EOF
 
-        echo "Reiniciando servicio DHCP..."
-        reiniciar_servicio dhcpd
+    echo "Reiniciando servicio DHCP..."
+    reiniciar_servicio dhcpd
+    habilitar_servicio dhcpd
 
-        if servicio_activo dhcpd; then
-            echo "Servidor DHCP configurado y funcionando correctamente"
-            estado_servicio dhcpd
-        else
-            echo "Error al iniciar el servicio DHCP"
-            echo "Ejecute: sudo journalctl -xeu dhcpd.service"
-        fi
+    if verificar_servicio dhcpd; then
+        echo "Servidor DHCP configurado y funcionando correctamente"
+        systemctl status dhcpd --no-pager
     else
-        echo "Volviendo a configurar..."
-        configurar_DHCP
+        echo "Error al iniciar el servicio DHCP"
+        echo "Ejecute: journalctl -xeu dhcpd.service"
     fi
 }
 
-monitorear_Clientes() {
+monitorear_dhcp() {
     local archivo_leases="/var/lib/dhcp/db/dhcpd.leases"
     local opc=""
 
@@ -335,7 +347,7 @@ monitorear_Clientes() {
         return 1
     fi
 
-    if ! servicio_activo dhcpd; then
+    if ! verificar_servicio dhcpd; then
         echo "El servicio DHCP no esta activo"
         read -p "Desea iniciarlo? (y/n): " opc
         if [[ "$opc" = "y" ]]; then
@@ -349,7 +361,7 @@ monitorear_Clientes() {
     echo "========== MONITOREO DE CLIENTES DHCP =========="
     echo ""
     echo "Seleccione una opcion:"
-    echo "  1. Ver todos los leases (historico)"
+    echo "  1. Ver todos los leases"
     echo "  2. Ver solo leases activos"
     echo "  3. Monitoreo en tiempo real"
     echo "  4. Ver estadisticas del servidor"
@@ -360,15 +372,17 @@ monitorear_Clientes() {
         1)
             echo ""
             echo "=== TODOS LOS LEASES ==="
+            echo ""
             cat "$archivo_leases"
             ;;
         2)
             echo ""
             echo "=== LEASES ACTIVOS ==="
-            echo -e "IP Address\t\tMAC Address\t\tHostname\t\tExpira"
+            echo ""
+            printf "%-20s %-20s %-20s %s\n" "IP Address" "MAC Address" "Hostname" "Expira"
             echo "-------------------------------------------------------------------------------------"
             awk '
-            /^lease/ {ip=$2; active=0}
+            /^lease/ {ip=$2; active=0; host=""}
             /hardware ethernet/ {mac=$3; gsub(";","",mac)}
             /client-hostname/ {host=$2; gsub(/[";]/,"",host)}
             /binding state active/ {active=1}
@@ -378,35 +392,41 @@ monitorear_Clientes() {
                     gsub(";","",expires)
                     printf "%-20s %-20s %-20s %s\n", ip, mac, host, expires
                 }
-            }' "$archivo_leases" | sort -u
+            }
+            ' "$archivo_leases" | sort -u
             ;;
         3)
             echo ""
             echo "=== MONITOREO EN TIEMPO REAL (Ctrl+C para salir) ==="
+            echo ""
             tail -f "$archivo_leases"
             ;;
         4)
             echo ""
             echo "=== ESTADISTICAS DEL SERVIDOR ==="
-            total=$(grep -c "^lease" "$archivo_leases")
-            activos=$(grep -c "binding state active" "$archivo_leases")
+            echo ""
+            local total=$(grep -c "^lease" "$archivo_leases")
+            local activos=$(grep -c "binding state active" "$archivo_leases")
             echo "Total de leases registrados: $total"
             echo "Leases activos: $activos"
             echo ""
             echo "Estado del servicio:"
-            estado_servicio dhcpd
+            systemctl status dhcpd --no-pager
             ;;
         5)
             local archivo_salida="reporte_dhcp_$(date +%Y%m%d_%H%M%S).txt"
+            echo ""
+            echo "=== GENERANDO REPORTE ==="
+            echo ""
             {
                 echo "REPORTE DHCP - $(date)"
                 echo "================================"
                 echo ""
                 echo "CLIENTES ACTIVOS:"
-                echo "IP Address          MAC Address          Hostname             Expira"
+                printf "%-20s %-20s %-20s %s\n" "IP Address" "MAC Address" "Hostname" "Expira"
                 echo "-------------------------------------------------------------------------------------"
                 awk '
-                /^lease/ {ip=$2; active=0}
+                /^lease/ {ip=$2; active=0; host=""}
                 /hardware ethernet/ {mac=$3; gsub(";","",mac)}
                 /client-hostname/ {host=$2; gsub(/[";]/,"",host)}
                 /binding state active/ {active=1}
@@ -416,7 +436,8 @@ monitorear_Clientes() {
                         gsub(";","",expires)
                         printf "%-20s %-20s %-20s %s\n", ip, mac, host, expires
                     }
-                }' "$archivo_leases" | sort -u
+                }
+                ' "$archivo_leases" | sort -u
                 echo ""
                 echo "================================"
                 echo "ESTADISTICAS:"
@@ -433,10 +454,12 @@ monitorear_Clientes() {
 
     echo ""
     echo "==============================================="
+    echo ""
 }
 
-reiniciar_DHCP() {
-    if ! servicio_activo dhcpd; then
+reiniciar_dhcp() {
+    echo "Reiniciando servidor DHCP..."
+    if ! verificar_servicio dhcpd; then
         echo "El servicio DHCP no esta activo"
         read -p "Desea iniciarlo en lugar de reiniciarlo? (y/n): " opc
         if [[ "$opc" = "y" ]]; then
@@ -447,22 +470,15 @@ reiniciar_DHCP() {
     else
         reiniciar_servicio dhcpd
     fi
-
-    if servicio_activo dhcpd; then
-        estado_servicio dhcpd
-    else
-        echo "Error al reiniciar el servidor DHCP"
-        echo "Ejecute: sudo journalctl -xeu dhcpd.service"
-    fi
 }
 
-ver_Estado_DHCP() {
+ver_estado_dhcp() {
     echo "=== ESTADO DEL SERVIDOR DHCP ==="
     echo ""
     estado_servicio dhcpd
 }
 
-ver_Configuracion_DHCP() {
+ver_configuracion_dhcp() {
     local config_file="/etc/dhcpd.conf"
     local sysconfig="/etc/sysconfig/dhcpd"
 
@@ -492,4 +508,5 @@ ver_Configuracion_DHCP() {
 
     echo ""
     echo "============================================================"
+    echo ""
 }

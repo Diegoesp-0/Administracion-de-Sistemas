@@ -1,33 +1,98 @@
 #!/bin/bash
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/funciones_comunes.sh"
+
 named_conf="/etc/named.conf"
 zones_dir="/var/lib/named"
 
-verificar_DNS() {
+verificar_dns() {
     echo "Verificando instalacion de BIND9..."
-
-    if paquete_instalado bind; then
+    if rpm -q bind &>/dev/null; then
         local version=$(rpm -q bind --queryformat '%{VERSION}')
         echo "BIND9 ya esta instalado (version: $version)"
         return 0
     fi
-
-    if command -v named &>/dev/null; then
-        echo "BIND9 encontrado: $(named -v 2>&1 | head -1)"
-        return 0
-    fi
-
-    if systemctl list-unit-files 2>/dev/null | grep -q "^named.service"; then
-        echo "Servicio named encontrado en systemd"
-        return 0
-    fi
-
     echo "BIND9 no esta instalado"
     return 1
 }
 
-instalar_DNS() {
-    configurar_ip_estatica || {
+configurar_ip_estatica_dns() {
+    local interfaz="enp0s8"
+
+    if ! ip link show "$interfaz" &>/dev/null; then
+        echo "La interfaz $interfaz no existe"
+        echo "Interfaces disponibles:"
+        ip -br link show | grep -v "lo" | awk '{print $1}'
+        read -r interfaz
+        if ! ip link show "$interfaz" &>/dev/null; then
+            echo "Interfaz no valida"
+            return 1
+        fi
+    fi
+
+    echo "Interfaz detectada: $interfaz"
+    local ifcfg="/etc/sysconfig/network/ifcfg-$interfaz"
+
+    if grep -q "BOOTPROTO=['\"]static['\"]" "$ifcfg" 2>/dev/null || grep -q "BOOTPROTO=static" "$ifcfg" 2>/dev/null; then
+        local ip_raw=$(grep "IPADDR=" "$ifcfg" | cut -d= -f2 | tr -d "'\"")
+        server_ip=${ip_raw%/*}
+        echo "IP estatica ya configurada: $server_ip"
+        export server_ip
+        return 0
+    fi
+
+    local IP_ACTUAL=$(ip addr show "$interfaz" | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+    local GATEWAY=$(ip route | grep default | awk '{print $3}')
+
+    echo "IP actual: $IP_ACTUAL"
+    echo "Gateway: $GATEWAY"
+
+    read -p "Desea configurar IP estatica? [S/n]: " respuesta
+    if [[ "$respuesta" =~ ^[Nn]$ ]]; then
+        echo "Se mantendra la configuracion DHCP"
+        server_ip=$IP_ACTUAL
+        export server_ip
+        return 0
+    fi
+
+    read -p "Usar IP actual $IP_ACTUAL como IP fija? [S/n]: " respuesta
+    if [[ -z "$respuesta" ]] || [[ "$respuesta" =~ ^[Ss]$ ]]; then
+        server_ip=$IP_ACTUAL
+        GW=$GATEWAY
+    else
+        read -p "Ingrese la IP fija deseada: " server_ip
+        validar_IP "$server_ip" || return 1
+        read -p "Ingrese el Gateway: " GW
+        validar_IP "$GW" || return 1
+        GATEWAY=$GW
+    fi
+
+    cat > "$ifcfg" <<EOF
+BOOTPROTO='static'
+IPADDR='$server_ip/24'
+GATEWAY='$GATEWAY'
+STARTMODE='auto'
+EOF
+
+    echo "Configuracion guardada en $ifcfg"
+    wicked ifdown "$interfaz" &>/dev/null
+    sleep 1
+    wicked ifup "$interfaz" &>/dev/null
+    sleep 2
+
+    if ping -c 1 "$GATEWAY" &>/dev/null; then
+        echo "Conectividad verificada con el gateway"
+    else
+        echo "No se pudo hacer ping al gateway, verifique la configuracion"
+    fi
+
+    echo "IP estatica configurada: $server_ip"
+    export server_ip
+}
+
+instalar_dns() {
+    configurar_ip_estatica_dns || {
         echo "No se pudo configurar la IP estatica"
         return 1
     }
@@ -35,30 +100,35 @@ instalar_DNS() {
     echo ""
     echo "=== Instalacion de BIND9 ==="
 
-    if verificar_DNS; then
-        read -rp "Desea reconfigurar el servidor DNS? [s/N]: " reconf
+    if verificar_dns; then
+        read -p "Desea reconfigurar el servidor DNS? [s/N]: " reconf
         if [[ ! "$reconf" =~ ^[Ss]$ ]]; then
             echo "Operacion cancelada"
             return 0
         fi
     else
-        echo "Instalando BIND9 y utilidades..."
-        echo "Actualizando repositorios..."
-        zypper refresh &>/dev/null
-
-        instalar_paquete bind || return 1
-
-        if zypper install -y bind-utils &>/dev/null; then
-            echo "Paquete bind-utils instalado correctamente"
-        else
-            echo "Error al instalar bind-utils (no critico)"
-        fi
+        instalar_paquete "bind" || return 1
+        instalar_paquete "bind-utils"
     fi
 
-    if [[ ! -d "$zones_dir" ]]; then
-        mkdir -p "$zones_dir"
-        echo "Directorio de zonas creado: $zones_dir"
+    _configurar_named_conf
+    habilitar_servicio named || return 1
+
+    if verificar_servicio named; then
+        reiniciar_servicio named || return 1
+    else
+        iniciar_servicio named || return 1
     fi
+
+    _configurar_firewall_dns
+
+    echo ""
+    echo "BIND9 instalado y configurado correctamente"
+    echo "IP del servidor DNS: $server_ip"
+}
+
+_configurar_named_conf() {
+    [ ! -d "$zones_dir" ] && mkdir -p "$zones_dir"
 
     cat > "$named_conf" <<EOF
 options {
@@ -86,65 +156,36 @@ zone "127.in-addr.arpa" {
 };
 EOF
 
-    if ! named-checkconf "$named_conf" 2>/dev/null; then
+    if named-checkconf "$named_conf" 2>/dev/null; then
+        echo "Archivo named.conf generado correctamente"
+        return 0
+    else
         echo "Error en la sintaxis de named.conf"
         return 1
     fi
-
-    echo "Archivo named.conf generado correctamente"
-
-    habilitar_servicio named || return 1
-
-    if servicio_activo named; then
-        echo "Servicio ya estaba activo, reiniciando..."
-        reiniciar_servicio named || return 1
-    else
-        if ! iniciar_servicio named; then
-            echo "Revise los logs: journalctl -u named"
-            return 1
-        fi
-    fi
-
-    abrir_puerto_firewall dns
-
-    echo ""
-    echo "Verificando estado del servidor DNS..."
-    echo ""
-
-    if servicio_activo named; then
-        echo "Servicio named: activo y corriendo"
-    else
-        echo "Servicio named: NO esta corriendo"
-        return 1
-    fi
-
-    ss -tulnp 2>/dev/null | grep -q ":53 " && echo "Puerto 53: escuchando" || echo "Puerto 53: NO esta escuchando"
-    named-checkconf "$named_conf" 2>/dev/null && echo "Configuracion: sintaxis correcta" || echo "Configuracion: hay errores de sintaxis"
-
-    echo ""
-    echo "BIND9 instalado y configurado correctamente"
-    echo "IP del servidor DNS: $server_ip"
-    echo "Configure su DHCP con DNS: $server_ip"
 }
 
-reiniciar_DNS() {
-    echo "Reiniciando servidor DNS..."
-
-    if reiniciar_servicio named; then
-        servicio_activo named && echo "Servicio named: activo" || echo "El servicio no quedo activo despues del reinicio"
+_configurar_firewall_dns() {
+    if command -v firewall-cmd &>/dev/null; then
+        firewall-cmd --add-service=dns --permanent 2>/dev/null && echo "Puerto 53 abierto en firewall"
+        firewall-cmd --reload 2>/dev/null && echo "Firewall recargado"
     else
-        echo "Revise los logs: journalctl -u named"
-        return 1
+        echo "firewalld no encontrado, configure el firewall manualmente (puerto 53 TCP/UDP)"
     fi
+}
+
+reiniciar_dns() {
+    echo "Reiniciando servidor DNS..."
+    reiniciar_servicio named
 }
 
 agregar_dominio() {
     echo "=== Agregar Dominio ==="
 
-    read -rp "Ingrese el nombre del dominio (ej: reprobados.com): " nuevo_dominio
+    read -p "Ingrese el nombre del dominio (ej: ejemplo.com): " nuevo_dominio
 
     if ! validate_domain "$nuevo_dominio"; then
-        echo "Dominio invalido, cancelando operacion"
+        echo "Dominio invalido, cancelando"
         return 1
     fi
 
@@ -154,15 +195,14 @@ agregar_dominio() {
     fi
 
     if [[ -n "$server_ip" ]]; then
-        read -rp "Ingrese la IP para $nuevo_dominio [$server_ip]: " nueva_ip
+        read -p "Ingrese la IP para $nuevo_dominio [$server_ip]: " nueva_ip
+        [[ -z "$nueva_ip" ]] && nueva_ip=$server_ip
     else
-        read -rp "Ingrese la IP para $nuevo_dominio: " nueva_ip
+        read -p "Ingrese la IP para $nuevo_dominio: " nueva_ip
     fi
 
-    [[ -z "$nueva_ip" && -n "$server_ip" ]] && nueva_ip=$server_ip
-
     if ! validar_IP "$nueva_ip"; then
-        echo "IP invalida, cancelando operacion"
+        echo "IP invalida, cancelando"
         return 1
     fi
 
@@ -181,8 +221,10 @@ agregar_dominio() {
             86400 )     ; Minimum TTL
 
 @           IN  NS      ns1.$nuevo_dominio.
+
 @           IN  A       $nueva_ip
 ns1         IN  A       $nueva_ip
+
 www         IN  CNAME   $nuevo_dominio.
 EOF
 
@@ -193,7 +235,6 @@ EOF
     fi
 
     echo "Archivo de zona creado correctamente"
-    echo "Agregando zona a $named_conf..."
 
     cat >> "$named_conf" <<EOF
 
@@ -211,7 +252,6 @@ EOF
     if systemctl reload named 2>/dev/null; then
         echo "Servicio recargado correctamente"
     else
-        echo "reload fallo, intentando restart..."
         reiniciar_servicio named
     fi
 
@@ -225,28 +265,24 @@ EOF
 
 eliminar_dominio() {
     echo "=== Eliminar Dominio ==="
-
     listar_dominios
     echo ""
 
-    read -rp "Ingrese el dominio a eliminar: " dominio_eliminar
+    read -p "Ingrese el dominio a eliminar: " dominio_eliminar
 
     if ! grep -q "zone \"$dominio_eliminar\"" "$named_conf" 2>/dev/null; then
         echo "El dominio $dominio_eliminar no existe en la configuracion"
         return 1
     fi
 
-    echo ""
-    read -rp "Esta seguro de eliminar el dominio $dominio_eliminar? [s/N]: " confirmacion
-
+    read -p "Esta seguro de eliminar el dominio $dominio_eliminar? [s/N]: " confirmacion
     if [[ ! "$confirmacion" =~ ^[Ss]$ ]]; then
-        echo "Operacion cancelada por el usuario"
+        echo "Operacion cancelada"
         return 0
     fi
 
     local zone_file="$zones_dir/${dominio_eliminar}.zone"
 
-    echo "Eliminando entrada de named.conf..."
     sed -i "/zone \"$dominio_eliminar\"/,/^};/d" "$named_conf"
 
     if named-checkconf "$named_conf" 2>/dev/null; then
@@ -259,14 +295,11 @@ eliminar_dominio() {
     if [[ -f "$zone_file" ]]; then
         rm -f "$zone_file"
         echo "Archivo de zona eliminado"
-    else
-        echo "Archivo de zona no encontrado: $zone_file"
     fi
 
     if systemctl reload named 2>/dev/null; then
         echo "Servicio recargado correctamente"
     else
-        echo "reload fallo, intentando restart..."
         reiniciar_servicio named
     fi
 
@@ -290,46 +323,51 @@ listar_dominios() {
 
     echo ""
     printf "%-30s %-20s %-15s\n" "DOMINIO" "IP CONFIGURADA" "ESTADO"
-    echo "──────────────────────────────────────────────────────────────"
+    echo "--------------------------------------------------------------"
 
     for dominio in "${dominios[@]}"; do
         local zone_file="$zones_dir/${dominio}.zone"
-        local ip_dom="N/A"
+        local ip="N/A"
         local estado="Sin archivo"
 
         if [[ -f "$zone_file" ]]; then
-            ip_dom=$(grep "^@[[:space:]]*IN[[:space:]]*A" "$zone_file" 2>/dev/null | awk '{print $NF}')
-            [[ -z "$ip_dom" ]] && ip_dom="N/A"
+            ip=$(grep "^@[[:space:]]*IN[[:space:]]*A" "$zone_file" 2>/dev/null | awk '{print $NF}')
+            [[ -z "$ip" ]] && ip="N/A"
             estado="Activo"
         fi
 
-        printf "%-30s %-20s %s\n" "$dominio" "$ip_dom" "$estado"
+        printf "%-30s %-20s %-15s\n" "$dominio" "$ip" "$estado"
     done
 
     echo ""
     echo "Total de dominios: ${#dominios[@]}"
 }
 
-monitoreo_DNS() {
+monitorear_dns() {
     while true; do
         echo ""
-        echo "============================================================"
-        echo "              Menu de Monitoreo DNS"
-        echo "============================================================"
+        echo "============================================"
+        echo "         Menu de Monitoreo DNS"
+        echo "============================================"
         echo ""
         echo "  1) Agregar dominio"
         echo "  2) Eliminar dominio"
         echo "  3) Listar dominios"
-        echo "  0) Volver al menu principal"
+        echo "  0) Salir"
         echo ""
-        read -rp "Opcion: " opcion
+        read -p "Opcion: " opcion
 
         case $opcion in
             1) agregar_dominio ;;
             2) eliminar_dominio ;;
             3) listar_dominios ;;
-            0) break ;;
-            *) echo "Opcion invalida: $opcion" ;;
+            0)
+                echo "Saliendo del menu de monitoreo"
+                break
+                ;;
+            *)
+                echo "Opcion invalida: $opcion"
+                ;;
         esac
     done
 }
