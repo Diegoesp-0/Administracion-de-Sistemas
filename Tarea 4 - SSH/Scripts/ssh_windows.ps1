@@ -35,6 +35,7 @@ function Iniciar-SSH {
         if (-not $regla) {
             New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -DisplayName "OpenSSH Server (sshd)" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
         }
+        Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
         Write-Host ""
         Write-Host "Servidor SSH iniciado correctamente"
         Write-Host "Puerto 22 abierto en el firewall"
@@ -119,3 +120,4 @@ if ($comando -eq "help") {
     Write-Host "     .\ssh_windows.ps1 help  para ver los comandos disponibles"
     Write-Host ""
 }
+
