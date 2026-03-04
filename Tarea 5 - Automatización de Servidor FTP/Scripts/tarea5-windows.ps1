@@ -1,834 +1,704 @@
-# ============================================================================
-# Script de Automatizacion de Servidor FTP - Windows Server 2025
-# Administracion de Sistemas - IIS con FTP Service
-# ============================================================================
+#!/bin/bash
 
 # ============================================================================
-# DEBE ESTAR AL INICIO DEL SCRIPT
+# Script de Automatización de Servidor FTP - openSUSE Leap
+# Administración de Sistemas
+# Servidor: vsftpd (Very Secure FTP Daemon)
 # ============================================================================
-param(
-    [switch]$verify,
-    [switch]$install,
-    [switch]$users,
-    [switch]$restart,
-    [switch]$status,
-    [switch]$list,
-    [switch]$help
-)
 
-# ============================================================================
-# VERIFICAR ADMINISTRADOR
-# ============================================================================
-$currentPrincipal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "[ERROR] Este script debe ejecutarse como Administrador" -ForegroundColor Red
-    exit 1
-}
+# Cargar librerías compartidas
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/utils.sh"
+source "$SCRIPT_DIR/../lib/validaciones.sh"
 
-# ============================================================================
-# Colores y utilidades
-# ============================================================================
-function Print-Info   { param($msg) Write-Host "[INFO]  $msg" -ForegroundColor Cyan }
-function Print-Ok     { param($msg) Write-Host "[OK]    $msg" -ForegroundColor Green }
-function Print-Error  { param($msg) Write-Host "[ERROR] $msg" -ForegroundColor Red }
-function Print-Warn   { param($msg) Write-Host "[WARN]  $msg" -ForegroundColor Yellow }
-function Print-Titulo { param($msg) Write-Host "`n=== $msg ===`n" -ForegroundColor Yellow }
-
-# ============================================================================
 # Variables Globales
-# ============================================================================
-$FTP_ROOT           = "C:\ftp"
-$GRUPO_REPROBADOS   = "reprobados"
-$GRUPO_RECURSADORES = "recursadores"
-$FTP_SITE_NAME      = "ServidorFTP"
-$FTP_PORT           = 21
+readonly PAQUETE="vsftpd"
+readonly VSFTPD_CONF="/etc/vsftpd.conf"
+readonly FTP_ROOT="/srv/ftp"
+readonly GRUPO_REPROBADOS="reprobados"
+readonly GRUPO_RECURSADORES="recursadores"
+readonly INTERFAZ_RED="enp0s9"
 
 # ============================================================================
-# IDENTIDADES POR SID - Independiente del idioma del SO
-# S-1-5-32-544 = Administrators / Administradores
-# S-1-5-18     = SYSTEM / SISTEMA
-# S-1-5-11     = Authenticated Users / Usuarios autenticados
-# S-1-5-17     = IUSR (cuenta anonima IIS)
+# FUNCIÓN: Mostrar ayuda
 # ============================================================================
-function Resolve-SID {
-    param([string]$Sid)
-    $sidObj = New-Object System.Security.Principal.SecurityIdentifier($Sid)
-    return $sidObj.Translate([System.Security.Principal.NTAccount])
-}
-
-$ID_ADMINS = Resolve-SID "S-1-5-32-544"
-$ID_SYSTEM = Resolve-SID "S-1-5-18"
-$ID_AUTH   = Resolve-SID "S-1-5-11"
-$ID_IUSR   = Resolve-SID "S-1-5-17"
-
-# ============================================================================
-# FUNCION: Crear regla ACL reutilizable
-# ============================================================================
-function New-ACLRule {
-    param(
-        [object]$Identity,
-        [string]$Rights = "FullControl",
-        [string]$Type   = "Allow"
-    )
-    return New-Object System.Security.AccessControl.FileSystemAccessRule(
-        $Identity, $Rights,
-        "ContainerInherit,ObjectInherit", "None", $Type
-    )
+ayuda() {
+    echo "Uso del script: $0"
+    echo "Opciones:"
+    echo -e "  -v, --verify       Verifica si está instalado vsftpd"
+    echo -e "  -i, --install      Instala y configura el servidor FTP"
+    echo -e "  -u, --users        Gestionar usuarios FTP"
+    echo -e "  -r, --restart      Reiniciar servidor FTP"
+    echo -e "  -s, --status       Verificar estado del servidor FTP"
+    echo -e "  -l, --list         Listar usuarios y estructura FTP"
+    echo -e "  -?, --help         Muestra esta ayuda"
 }
 
 # ============================================================================
-# FUNCION: Aplicar ACL limpia a una carpeta
+# FUNCIÓN: Verificar instalación de vsftpd
 # ============================================================================
-function Set-FolderACL {
-    param(
-        [string]$Path,
-        [System.Security.AccessControl.FileSystemAccessRule[]]$Rules
-    )
-    $acl = Get-Acl $Path
-    $acl.SetAccessRuleProtection($true, $false)
-    foreach ($rule in $Rules) {
-        $acl.AddAccessRule($rule)
-    }
-    Set-Acl -Path $Path -AclObject $acl
+verificar_Instalacion() {
+    print_info "Verificando instalación de vsftpd"
+    
+    if rpm -q $PAQUETE &>/dev/null; then
+        local version=$(rpm -q $PAQUETE --queryformat '%{VERSION}')
+        print_completado "vsftpd ya está instalado (versión: $version)"
+        return 0
+    fi
+    
+    if command -v vsftpd &>/dev/null; then
+        local version=$(vsftpd -v 2>&1 | head -1)
+        print_completado "vsftpd encontrado: $version"
+        return 0
+    fi
+    
+    print_error "vsftpd no está instalado"
+    return 1
 }
 
 # ============================================================================
-# FUNCION: Otorgar derecho "Log on locally" requerido por IIS FTP
+# FUNCIÓN: Crear estructura de directorios base
 # ============================================================================
-function Grant-FTPLogonRight {
-    param([string]$Username)
-
-    $exportInf = "$env:TEMP\secedit_export.inf"
-    $applyInf  = "$env:TEMP\secedit_apply.inf"
-    $applyDb   = "$env:TEMP\secedit_apply.sdb"
-
-    # Exportar politica actual
-    & secedit /export /cfg $exportInf /quiet 2>$null
-
-    $cfg = Get-Content $exportInf -ErrorAction SilentlyContinue
-    $linea = $cfg | Where-Object { $_ -match "^SeInteractiveLogonRight" }
-
-    # Si ya tiene el usuario, no hacer nada
-    if ($linea -and $linea -match [regex]::Escape($Username)) {
-        Print-Info "  '$Username' ya tiene derecho de logon local."
-        return
-    }
-
-    # Construir nueva linea agregando el usuario
-    if ($linea) {
-        $nuevaLinea = "$linea,*$Username"
-    } else {
-        $nuevaLinea = "SeInteractiveLogonRight = *$Username"
-    }
-
-    $infContent = @"
-[Unicode]
-Unicode=yes
-[Version]
-signature="`$CHICAGO`$"
-Revision=1
-[Privilege Rights]
-$nuevaLinea
-"@
-    $infContent | Out-File -FilePath $applyInf -Encoding Unicode
-    & secedit /configure /db $applyDb /cfg $applyInf /quiet 2>$null
-
-    Remove-Item $exportInf, $applyInf, $applyDb -ErrorAction SilentlyContinue
-    Print-Ok "  Derecho 'Log on locally' otorgado a '$Username'."
+crear_Estructura_Base() {
+    print_info "Creando estructura de directorios FTP..."
+    
+    # Crear directorio raíz FTP si no existe
+    if [ ! -d "$FTP_ROOT" ]; then
+        sudo mkdir -p "$FTP_ROOT"
+        print_completado "Directorio raíz creado: $FTP_ROOT"
+    fi
+    
+    # Crear directorio para homes de usuarios FTP
+    if [ ! -d "/home/ftp_users" ]; then
+        sudo mkdir -p "/home/ftp_users"
+        sudo chmod 755 "/home/ftp_users"
+        print_completado "Directorio para usuarios FTP creado"
+    fi
+    
+    # Crear carpeta para datos personales de usuarios
+    if [ ! -d "$FTP_ROOT/_users" ]; then
+        sudo mkdir -p "$FTP_ROOT/_users"
+        sudo chmod 755 "$FTP_ROOT/_users"
+        print_completado "Directorio de datos personales creado"
+    fi
+    
+    # Crear carpeta general (pública)
+    if [ ! -d "$FTP_ROOT/general" ]; then
+        sudo mkdir -p "$FTP_ROOT/general"
+        print_completado "Carpeta 'general' creada"
+    fi
+    
+    # Crear carpetas de grupos
+    if [ ! -d "$FTP_ROOT/$GRUPO_REPROBADOS" ]; then
+        sudo mkdir -p "$FTP_ROOT/$GRUPO_REPROBADOS"
+        print_completado "Carpeta '$GRUPO_REPROBADOS' creada"
+    fi
+    
+    if [ ! -d "$FTP_ROOT/$GRUPO_RECURSADORES" ]; then
+        sudo mkdir -p "$FTP_ROOT/$GRUPO_RECURSADORES"
+        print_completado "Carpeta '$GRUPO_RECURSADORES' creada"
+    fi
+    
+    # Configurar permisos base
+    sudo chmod 755 "$FTP_ROOT/general"
+    sudo chown root:users "$FTP_ROOT/general"
+    
+    # Carpetas de grupo: solo accesibles por miembros del grupo
+    sudo chmod 770 "$FTP_ROOT/$GRUPO_REPROBADOS"
+    sudo chmod 770 "$FTP_ROOT/$GRUPO_RECURSADORES"
+    
+    print_completado "Estructura de directorios base configurada"
 }
 
 # ============================================================================
-# FUNCION: Verificar instalacion de IIS y FTP
+# FUNCIÓN: Crear grupos del sistema
 # ============================================================================
-function Verificar-Instalacion {
-    Print-Info "Verificando instalacion de IIS y FTP..."
-    $iis = Get-WindowsFeature -Name "Web-Server"      -ErrorAction SilentlyContinue
-    $ftp = Get-WindowsFeature -Name "Web-Ftp-Server"  -ErrorAction SilentlyContinue
-
-    if ($iis.Installed -and $ftp.Installed) {
-        Print-Ok "IIS y FTP Service instalados."
-        return $true
-    }
-    if (-not $iis.Installed) { Print-Error "IIS (Web-Server) no instalado." }
-    if (-not $ftp.Installed) { Print-Error "FTP Service (Web-Ftp-Server) no instalado." }
-    return $false
+crear_Grupos() {
+    print_info "Verificando grupos del sistema..."
+    
+    if ! getent group $GRUPO_REPROBADOS &>/dev/null; then
+        sudo groupadd $GRUPO_REPROBADOS
+        print_completado "Grupo '$GRUPO_REPROBADOS' creado"
+    else
+        print_info "Grupo '$GRUPO_REPROBADOS' ya existe"
+    fi
+    
+    if ! getent group $GRUPO_RECURSADORES &>/dev/null; then
+        sudo groupadd $GRUPO_RECURSADORES
+        print_completado "Grupo '$GRUPO_RECURSADORES' creado"
+    else
+        print_info "Grupo '$GRUPO_RECURSADORES' ya existe"
+    fi
+    
+    sudo chgrp $GRUPO_REPROBADOS "$FTP_ROOT/$GRUPO_REPROBADOS"
+    sudo chgrp $GRUPO_RECURSADORES "$FTP_ROOT/$GRUPO_RECURSADORES"
+    
+    print_completado "Grupos configurados correctamente"
 }
 
 # ============================================================================
-# FUNCION: Configurar firewall
+# FUNCIÓN: Configurar vsftpd
 # ============================================================================
-function Configurar-Firewall {
-    Print-Info "Configurando firewall..."
+configurar_Vsftpd() {
+    print_info "Configurando vsftpd..."
+    
+    # Validar que nologin sea una shell válida para PAM
+    if ! grep -q "/usr/sbin/nologin" /etc/shells; then
+        echo "/usr/sbin/nologin" | sudo tee -a /etc/shells > /dev/null
+    fi
+    
+    # Backup del archivo de configuración original
+    if [ -f "$VSFTPD_CONF" ]; then
+        sudo cp "$VSFTPD_CONF" "${VSFTPD_CONF}.backup.$(date +%Y%m%d_%H%M%S)"
+        print_info "Backup de configuración creado"
+    fi
+    
+    # Crear nueva configuración
+    sudo tee "$VSFTPD_CONF" > /dev/null << 'EOF'
+# Configuración vsftpd - Servidor FTP Seguro
+# Generado automáticamente
 
-    if (-not (Get-NetFirewallRule -DisplayName "FTP Puerto 21" -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule -DisplayName "FTP Puerto 21" `
-            -Direction Inbound -Protocol TCP -LocalPort 21 -Action Allow | Out-Null
-        Print-Ok "Puerto 21 abierto."
-    } else { Print-Info "Regla puerto 21 ya existe." }
+# Configuración básica
+listen=YES
+listen_ipv6=NO
 
-    if (-not (Get-NetFirewallRule -DisplayName "FTP Pasivo 40000-40100" -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule -DisplayName "FTP Pasivo 40000-40100" `
-            -Direction Inbound -Protocol TCP -LocalPort 40000-40100 -Action Allow | Out-Null
-        Print-Ok "Puertos pasivos 40000-40100 abiertos."
-    } else { Print-Info "Regla puertos pasivos ya existe." }
+# Usuarios locales
+local_enable=YES
+write_enable=YES
+local_umask=022
+
+# Usuario anónimo
+anonymous_enable=YES
+anon_root=/srv/ftp/general
+no_anon_password=YES
+anon_upload_enable=NO
+anon_mkdir_write_enable=NO
+anon_other_write_enable=NO
+
+# Enjaulado de usuarios (chroot)
+chroot_local_user=YES
+allow_writeable_chroot=YES
+user_sub_token=$USER
+local_root=/home/ftp_users/$USER/ftp
+
+# Seguridad
+seccomp_sandbox=NO
+hide_ids=YES
+use_localtime=YES
+
+# Permisos de archivos
+file_open_mode=0666
+
+# Logging
+xferlog_enable=YES
+xferlog_file=/var/log/vsftpd.log
+log_ftp_protocol=YES
+
+# Configuración de conexión
+connect_from_port_20=YES
+idle_session_timeout=600
+data_connection_timeout=120
+
+# Banner
+ftpd_banner=Bienvenido al servidor FTP - Acceso restringido
+
+# Activar modo pasivo
+pasv_enable=YES
+pasv_min_port=40000
+pasv_max_port=40100
+
+# Lista de usuarios permitidos
+userlist_enable=YES
+userlist_deny=NO
+userlist_file=/etc/vsftpd.user_list
+
+# Autenticación PAM (Añadido para solucionar error Puerto 21)
+pam_service_name=login
+EOF
+
+    print_completado "Archivo de configuración vsftpd creado"
+    
+    if [ ! -f /etc/vsftpd.user_list ]; then
+        sudo touch /etc/vsftpd.user_list
+
+        echo "anonymous" | sudo tee -a /etc/vsftpd.user_list > /dev/null
+        echo "ftp" | sudo tee -a /etc/vsftpd.user_list > /dev/null
+
+        print_completado "Archivo de lista de usuarios creado"
+    fi
 }
 
 # ============================================================================
-# FUNCION: Crear grupos locales
+# FUNCIÓN: Instalar y configurar servidor FTP
 # ============================================================================
-function Crear-Grupos {
-    Print-Info "Verificando grupos del sistema..."
-    foreach ($grupo in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
-        if (-not (Get-LocalGroup -Name $grupo -ErrorAction SilentlyContinue)) {
-            New-LocalGroup -Name $grupo -Description "Grupo FTP $grupo" | Out-Null
-            Print-Ok "Grupo '$grupo' creado."
-        } else {
-            Print-Info "Grupo '$grupo' ya existe."
-        }
-    }
+instalar_FTP() {
+    print_titulo "Instalación y Configuración de Servidor FTP"
+    
+    if verificar_Instalacion; then
+        print_info "¿Desea reconfigurar el servidor FTP? [s/N]: "
+        read -r reconf
+        if [[ ! "$reconf" =~ ^[Ss]$ ]]; then
+            print_info "Operación cancelada"
+            return 0
+        fi
+    else
+        print_info "Instalando vsftpd..."
+        sudo zypper --non-interactive --quiet install $PAQUETE > /dev/null 2>&1 &
+        pid=$!
+        
+        print_info "vsftpd se está instalando..."
+        wait $pid
+        
+        if [ $? -eq 0 ]; then
+            print_completado "vsftpd instalado correctamente"
+        else
+            print_error "Error en la instalación de vsftpd"
+            return 1
+        fi
+    fi
+    
+    echo ""
+    crear_Grupos
+    echo ""
+    crear_Estructura_Base
+    echo ""
+    configurar_Vsftpd
+    echo ""
+    
+    print_info "Habilitando servicio vsftpd en el arranque..."
+    if sudo systemctl enable vsftpd 2>/dev/null; then
+        print_completado "Servicio vsftpd habilitado"
+    else
+        print_error "No se pudo habilitar el servicio vsftpd"
+        return 1
+    fi
+    
+    print_info "Iniciando servicio vsftpd..."
+    if systemctl is-active --quiet vsftpd; then
+        print_info "Servicio ya estaba activo, reiniciando..."
+        sudo systemctl restart vsftpd 2>/dev/null
+    else
+        if ! sudo systemctl start vsftpd 2>/dev/null; then
+            print_error "Error al iniciar el servicio vsftpd"
+            return 1
+        fi
+    fi
+    
+    print_info "Configurando políticas de SELinux para FTP..."
+    if command -v getenforce &>/dev/null && [ "$(getenforce)" != "Disabled" ]; then
+        sudo setsebool -P allow_ftpd_full_access 1 2>/dev/null
+        print_completado "SELinux: Permisos de lectura/escritura FTP concedidos"
+    else
+        print_info "SELinux inactivo, omitiendo configuración"
+    fi
+
+    print_info "Configurando firewall para FTP..."
+    if command -v firewall-cmd &>/dev/null; then
+        sudo firewall-cmd --add-service=ftp --permanent 2>/dev/null
+        sudo firewall-cmd --add-port=40000-40100/tcp --permanent 2>/dev/null
+        sudo firewall-cmd --reload 2>/dev/null
+        print_completado "Reglas de firewall aplicadas"
+    else
+        print_error "firewalld no encontrado, configure el firewall manualmente"
+    fi
+    
+    echo ""
+    print_info "Verificando estado del servidor FTP..."
+    
+    if systemctl is-active --quiet vsftpd; then
+        print_completado "Servicio vsftpd: activo y corriendo"
+    else
+        print_error "Servicio vsftpd: NO está corriendo"
+        return 1
+    fi
+    
+    local ip=$(ip addr show $INTERFAZ_RED 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
+    
+    if [ -z "$ip" ]; then
+        ip=$(ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d'/' -f1 | head -1)
+    fi
+    
+    echo ""
+    print_completado "══════════════════════════════════════"
+    print_completado "  Servidor FTP listo"
+    print_completado "══════════════════════════════════════"
+    print_info "  IP del servidor : ${verde}$ip${nc}"
+    print_info "  Puerto FTP      : ${verde}21${nc}"
+    print_info "  Raíz FTP        : ${verde}$FTP_ROOT${nc}"
+    print_completado "══════════════════════════════════════"
 }
 
 # ============================================================================
-# FUNCION: Crear estructura de directorios base
-#
-# C:\ftp\
-# └── LocalUser\
-#     ├── Public\          <- home del anonimo
-#     │   └── general\     <- carpeta publica compartida
-#     ├── reprobados\      <- carpeta compartida del grupo
-#     └── recursadores\    <- carpeta compartida del grupo
+# FUNCIÓN: Validar nombre de usuario
 # ============================================================================
-function Crear-Estructura-Base {
-    Print-Info "Creando estructura de directorios..."
-
-    $dirs = @(
-        $FTP_ROOT,
-        "$FTP_ROOT\LocalUser",
-        "$FTP_ROOT\LocalUser\Public",
-        "$FTP_ROOT\LocalUser\Public\general",
-        "$FTP_ROOT\LocalUser\reprobados",
-        "$FTP_ROOT\LocalUser\recursadores"
-    )
-
-    foreach ($dir in $dirs) {
-        if (-not (Test-Path $dir)) {
-            New-Item -ItemType Directory -Path $dir -Force | Out-Null
-            Print-Ok "Creado: $dir"
-        } else {
-            Print-Info "Ya existe: $dir"
-        }
-    }
-
-    # --- Permisos raiz FTP: solo admins
-    Set-FolderACL -Path $FTP_ROOT -Rules @(
-        (New-ACLRule $ID_ADMINS "FullControl"),
-        (New-ACLRule $ID_SYSTEM "FullControl")
-    )
-
-    # --- Permisos LocalUser\Public (home anonimo)
-    # IUSR solo puede listar esta carpeta, pero NO su contenido directamente
-    # Solo llegara a ver 'general' porque es la unica subcarpeta
-    Set-FolderACL -Path "$FTP_ROOT\LocalUser\Public" -Rules @(
-        (New-ACLRule $ID_ADMINS "FullControl"),
-        (New-ACLRule $ID_SYSTEM "FullControl"),
-        (New-ACLRule $ID_IUSR   "ReadAndExecute")
-    )
-
-    # --- Permisos general: autenticados escriben, IUSR solo lee
-    Set-FolderACL -Path "$FTP_ROOT\LocalUser\Public\general" -Rules @(
-        (New-ACLRule $ID_ADMINS "FullControl"),
-        (New-ACLRule $ID_SYSTEM "FullControl"),
-        (New-ACLRule $ID_AUTH   "Modify"),
-        (New-ACLRule $ID_IUSR   "ReadAndExecute")
-    )
-    Print-Ok "Permisos 'general' configurados."
-
-    # --- Permisos carpetas de grupo: IUSR sin acceso, solo el grupo respectivo
-    foreach ($grupo in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
-        Set-FolderACL -Path "$FTP_ROOT\LocalUser\$grupo" -Rules @(
-            (New-ACLRule $ID_ADMINS "FullControl"),
-            (New-ACLRule $ID_SYSTEM "FullControl"),
-            (New-ACLRule $grupo     "Modify")
-            # IUSR no tiene regla aqui: sin acceso a carpetas de grupo
-        )
-        Print-Ok "Permisos '$grupo' configurados (anonimo sin acceso)."
-    }
-
-    Print-Ok "Estructura base lista."
+validar_Usuario() {
+    local usuario="$1"
+    if [ -z "$usuario" ]; then
+        print_error "El nombre de usuario no puede estar vacío"
+        return 1
+    fi
+    if [ ${#usuario} -lt 3 ] || [ ${#usuario} -gt 32 ]; then
+        print_error "El nombre de usuario debe tener entre 3 y 32 caracteres"
+        return 1
+    fi
+    if [[ ! "$usuario" =~ ^[a-z][a-z0-9_-]*$ ]]; then
+        print_error "El nombre de usuario debe comenzar con letra minúscula"
+        return 1
+    fi
+    if id "$usuario" &>/dev/null; then
+        print_error "El usuario '$usuario' ya existe en el sistema"
+        return 1
+    fi
+    return 0
 }
 
 # ============================================================================
-# FUNCION: Configurar sitio FTP en IIS
+# FUNCIÓN: Validar contraseña
 # ============================================================================
-function Configurar-FTP {
-    Print-Info "Configurando sitio FTP en IIS..."
-
-    Import-Module WebAdministration -ErrorAction Stop
-
-    # Eliminar sitio anterior si existe
-    if (Get-WebSite -Name $FTP_SITE_NAME -ErrorAction SilentlyContinue) {
-        & "$env:SystemRoot\System32\inetsrv\appcmd.exe" stop site $FTP_SITE_NAME 2>$null
-        Remove-WebSite -Name $FTP_SITE_NAME
-        Print-Info "Sitio anterior eliminado."
-    }
-
-    # Crear sitio FTP apuntando a la raiz
-    New-WebFtpSite -Name $FTP_SITE_NAME -Port $FTP_PORT -PhysicalPath $FTP_ROOT -Force | Out-Null
-    Print-Ok "Sitio '$FTP_SITE_NAME' creado."
-
-    # User Isolation modo 3: enjaula cada usuario en LocalUser\<username>
-    Set-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" `
-        -Name "ftpServer.userIsolation.mode" -Value 3
-    Print-Ok "User Isolation activado."
-
-    # Autenticacion basica y anonima
-    Set-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" `
-        -Name "ftpServer.security.authentication.basicAuthentication.enabled" -Value $true
-    Set-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" `
-        -Name "ftpServer.security.authentication.anonymousAuthentication.enabled" -Value $true
-    Print-Ok "Autenticacion configurada."
-
-    # SSL deshabilitado (entorno de laboratorio)
-    # Usar valor numerico 0 directamente en el XML para evitar error 0x800710D8
-    $configFile = "$env:SystemRoot\System32\inetsrv\config\applicationHost.config"
-    [xml]$xml = Get-Content $configFile
-
-    $siteNode = $xml.configuration.'system.applicationHost'.sites.site |
-        Where-Object { $_.name -eq $FTP_SITE_NAME }
-
-    if ($siteNode) {
-        $sslNode = $siteNode.ftpServer.security.ssl
-        if ($sslNode) {
-            $sslNode.SetAttribute("controlChannelPolicy", "SslAllow")
-            $sslNode.SetAttribute("dataChannelPolicy",    "SslAllow")
-            $sslNode.SetAttribute("serverCertHash",       "")
-            $sslNode.SetAttribute("serverCertStoreName",  "")
-            $xml.Save($configFile)
-            Print-Ok "SSL configurado correctamente en applicationHost.config."
-        }
-    }
-
-    # SSL deshabilitado (entorno de laboratorio) - Permitir texto plano
-    Set-ItemProperty -Path "IIS:\Sites\$FTP_SITE_NAME" -Name "ftpServer.security.ssl.controlChannelPolicy" -Value "SslAllow"
-    Set-ItemProperty -Path "IIS:\Sites\$FTP_SITE_NAME" -Name "ftpServer.security.ssl.dataChannelPolicy" -Value "SslAllow"
-    Print-Ok "SSL configurado para permitir texto plano."
-
-    # Puertos pasivos
-    Set-WebConfigurationProperty -PSPath "IIS:\" `
-        -Filter "system.ftpServer/firewallSupport" `
-        -Name "lowDataChannelPort"  -Value 40000
-    Set-WebConfigurationProperty -PSPath "IIS:\" `
-        -Filter "system.ftpServer/firewallSupport" `
-        -Name "highDataChannelPort" -Value 40100
-    Print-Ok "Puertos pasivos 40000-40100 configurados."
-
-    # Limpiar reglas anteriores
-    Clear-WebConfiguration "/system.ftpServer/security/authorization" `
-        -PSPath "IIS:\" -Location $FTP_SITE_NAME -ErrorAction SilentlyContinue
-
-    # Anonimo: solo lectura (vera unicamente general por permisos NTFS)
-    Add-WebConfiguration "/system.ftpServer/security/authorization" `
-        -PSPath "IIS:\" -Location $FTP_SITE_NAME `
-        -Value @{ accessType="Allow"; users="?"; roles=""; permissions=1 } `
-        -ErrorAction SilentlyContinue
-
-    # Usuarios autenticados: lectura y escritura
-    Add-WebConfiguration "/system.ftpServer/security/authorization" `
-        -PSPath "IIS:\" -Location $FTP_SITE_NAME `
-        -Value @{ accessType="Allow"; users="*"; roles=""; permissions=3 } `
-        -ErrorAction SilentlyContinue
-
-    # Reiniciar servicio FTP para aplicar cambios del XML
-    Stop-Service ftpsvc -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-    Start-Service ftpsvc
-    Start-Sleep -Seconds 2
-
-    # Arrancar sitio
-    & "$env:SystemRoot\System32\inetsrv\appcmd.exe" start site $FTP_SITE_NAME
-    $estado = (& "$env:SystemRoot\System32\inetsrv\appcmd.exe" list site $FTP_SITE_NAME)
-    Print-Ok "Estado del sitio: $estado"
+validar_Contrasena() {
+    local password="$1"
+    if [ ${#password} -lt 6 ]; then
+        print_error "La contraseña debe tener al menos 6 caracteres"
+        return 1
+    fi
+    return 0
 }
 
 # ============================================================================
-# FUNCION: Construir jaula del usuario con junctions del sistema de archivos
-#
-# Estructura visible al usuario al conectarse:
-#   /                    <- C:\ftp\LocalUser\<usuario>\
-#   ├── general\         <- junction -> C:\ftp\LocalUser\Public\general
-#   ├── reprobados\      <- junction -> C:\ftp\LocalUser\reprobados
-#   │   (o recursadores)
-#   └── <usuario>\       <- carpeta personal fisica
-#
-# NOTA: Se usan junctions (mklink /J) porque IIS FTP User Isolation
-# NO muestra Virtual Directories en el listado de directorios.
+# FUNCIÓN: Crear usuario FTP
 # ============================================================================
-function Construir-Jaula-Usuario {
-    param(
-        [string]$usuario,
-        [string]$grupo
-    )
-
-    Print-Info "Construyendo jaula FTP para '$usuario'..."
-
-    $jaula    = "$FTP_ROOT\LocalUser\$usuario"
-    $personal = "$jaula\$usuario"
-
-    # Crear carpeta home del usuario
-    if (-not (Test-Path $jaula)) {
-        New-Item -ItemType Directory -Path $jaula -Force | Out-Null
-    }
-
-    # Crear carpeta personal fisica dentro del home
-    if (-not (Test-Path $personal)) {
-        New-Item -ItemType Directory -Path $personal -Force | Out-Null
-    }
-
-    # Obtener SID del usuario para permisos (evita problemas de idioma)
-    $userSID     = (Get-LocalUser -Name $usuario).SID
-    $userAccount = $userSID.Translate([System.Security.Principal.NTAccount])
-
-    # Permisos home del usuario
-    Set-FolderACL -Path $jaula -Rules @(
-        (New-ACLRule $ID_ADMINS   "FullControl"),
-        (New-ACLRule $ID_SYSTEM   "FullControl"),
-        (New-ACLRule $userAccount "Modify")
-    )
-
-    # Permisos carpeta personal
-    Set-FolderACL -Path $personal -Rules @(
-        (New-ACLRule $ID_ADMINS   "FullControl"),
-        (New-ACLRule $ID_SYSTEM   "FullControl"),
-        (New-ACLRule $userAccount "Modify")
-    )
-    Print-Ok "  Carpeta personal: $personal"
-
-    # Junction: general -> C:\ftp\LocalUser\Public\general (compartida todos)
-    $jGeneral = "$jaula\general"
-    if (-not (Test-Path $jGeneral)) {
-        cmd /c "mklink /J `"$jGeneral`" `"$FTP_ROOT\LocalUser\Public\general`"" | Out-Null
-        Print-Ok "  Junction 'general' creado."
-    } else {
-        Print-Info "  Junction 'general' ya existe."
-    }
-
-    # Junction: <grupo> -> C:\ftp\LocalUser\<grupo> (solo su grupo)
-    $jGrupo = "$jaula\$grupo"
-    if (-not (Test-Path $jGrupo)) {
-        cmd /c "mklink /J `"$jGrupo`" `"$FTP_ROOT\LocalUser\$grupo`"" | Out-Null
-        Print-Ok "  Junction '$grupo' creado."
-    } else {
-        Print-Info "  Junction '$grupo' ya existe."
-    }
-
-    Print-Ok "Jaula lista para '$usuario'."
+crear_Usuario_FTP() {
+    local usuario="$1"
+    local password="$2"
+    local grupo="$3"
+    
+    print_info "Creando usuario '$usuario' en grupo '$grupo'..."
+    local user_home="/home/ftp_users/$usuario"
+    
+    # Crear usuario del sistema sin acceso a shell (Bloquea puerto 22)
+    if sudo useradd -m -d "$user_home" -s /usr/sbin/nologin -g "$grupo" "$usuario" 2>/dev/null; then
+        print_completado "Usuario del sistema creado"
+    else
+        print_error "Error al crear usuario del sistema"
+        return 1
+    fi
+    
+    echo "$usuario:$password" | sudo chpasswd
+    
+    print_info "Creando estructura de directorios y montajes..."
+    
+    # Crear carpeta personal real en FTP_ROOT
+    local carpeta_personal="$FTP_ROOT/_users/$usuario"
+    sudo mkdir -p "$carpeta_personal"
+    sudo chown "$usuario:$grupo" "$carpeta_personal"
+    sudo chmod 700 "$carpeta_personal"
+    
+    # Crear carpetas vacías para los puntos de montaje (Reemplaza symlinks)
+    sudo mkdir -p "$user_home/ftp/$usuario"
+    sudo mkdir -p "$user_home/ftp/general"
+    sudo mkdir -p "$user_home/ftp/$grupo"
+    
+    # Montar los directorios reales en el home del usuario (bind mounts)
+    sudo mount --bind "$carpeta_personal" "$user_home/ftp/$usuario"
+    sudo mount --bind "$FTP_ROOT/general" "$user_home/ftp/general"
+    sudo mount --bind "$FTP_ROOT/$grupo" "$user_home/ftp/$grupo"
+    
+    # Hacer los montajes persistentes en fstab
+    echo "$carpeta_personal $user_home/ftp/$usuario none bind 0 0" | sudo tee -a /etc/fstab > /dev/null
+    echo "$FTP_ROOT/general $user_home/ftp/general none bind 0 0" | sudo tee -a /etc/fstab > /dev/null
+    echo "$FTP_ROOT/$grupo $user_home/ftp/$grupo none bind 0 0" | sudo tee -a /etc/fstab > /dev/null
+    
+    # Configurar permisos en el home
+    sudo chown root:root "$user_home"
+    sudo chmod 755 "$user_home"
+    sudo chown root:root "$user_home/ftp"
+    sudo chmod 755 "$user_home/ftp"
+    
+    if ! grep -q "^$usuario$" /etc/vsftpd.user_list 2>/dev/null; then
+        echo "$usuario" | sudo tee -a /etc/vsftpd.user_list > /dev/null
+    fi
+    
+    if command -v setfacl &>/dev/null; then
+        sudo setfacl -m u:${usuario}:rwx "$FTP_ROOT/general" 2>/dev/null
+        sudo setfacl -m u:${usuario}:rwx "$FTP_ROOT/$grupo" 2>/dev/null
+    fi
+    
+    print_completado "Usuario '$usuario' creado exitosamente"
+    return 0
 }
 
 # ============================================================================
-# FUNCION: Destruir jaula del usuario
+# FUNCIÓN: Cambiar usuario de grupo
 # ============================================================================
-function Destruir-Jaula-Usuario {
-    param([string]$usuario)
-
-    Print-Info "Eliminando jaula de '$usuario'..."
-
-    $jaula = "$FTP_ROOT\LocalUser\$usuario"
-
-    # Eliminar junctions con rmdir (NO usar Remove-Item, borraria el contenido real)
-    foreach ($junc in @("general", $GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
-        $juncPath = "$jaula\$junc"
-        if (Test-Path $juncPath) {
-            cmd /c "rmdir `"$juncPath`"" | Out-Null
-            Print-Ok "  Junction '$junc' eliminado."
-        }
-    }
-
-    # Eliminar carpeta home
-    $jaula = "$FTP_ROOT\LocalUser\$usuario"
-    if (Test-Path $jaula) {
-        Remove-Item -Path $jaula -Recurse -Force
-        Print-Ok "  Carpeta home eliminada."
-    }
+cambiar_Grupo_Usuario() {
+    local usuario="$1"
+    
+    if ! id "$usuario" &>/dev/null; then
+        print_error "El usuario '$usuario' no existe"
+        return 1
+    fi
+    
+    local grupo_actual=$(id -gn "$usuario")
+    print_info "Grupo actual de '$usuario': $grupo_actual"
+    
+    echo ""
+    echo "Grupos disponibles:"
+    echo "  1) $GRUPO_REPROBADOS"
+    echo "  2) $GRUPO_RECURSADORES"
+    read -p "Seleccione el nuevo grupo [1-2]: " opcion
+    
+    local nuevo_grupo
+    case $opcion in
+        1) nuevo_grupo="$GRUPO_REPROBADOS" ;;
+        2) nuevo_grupo="$GRUPO_RECURSADORES" ;;
+        *) print_error "Opción inválida"; return 1 ;;
+    esac
+    
+    if [ "$grupo_actual" == "$nuevo_grupo" ]; then
+        print_info "El usuario ya pertenece al grupo '$nuevo_grupo'"
+        return 0
+    fi
+    
+    if sudo usermod -g "$nuevo_grupo" "$usuario"; then
+        print_completado "Usuario '$usuario' movido al grupo '$nuevo_grupo'"
+        
+        local user_home="/home/ftp_users/$usuario"
+        local ftp_dir="$user_home/ftp"
+        
+        # Desmontar grupo anterior y quitar de fstab
+        if mountpoint -q "$ftp_dir/$grupo_actual"; then
+            sudo umount "$ftp_dir/$grupo_actual"
+            sudo rmdir "$ftp_dir/$grupo_actual"
+        fi
+        sudo sed -i "\|$FTP_ROOT/$grupo_actual $ftp_dir/$grupo_actual|d" /etc/fstab
+        
+        # Crear nuevo punto de montaje y montar
+        sudo mkdir -p "$ftp_dir/$nuevo_grupo"
+        sudo mount --bind "$FTP_ROOT/$nuevo_grupo" "$ftp_dir/$nuevo_grupo"
+        echo "$FTP_ROOT/$nuevo_grupo $ftp_dir/$nuevo_grupo none bind 0 0" | sudo tee -a /etc/fstab > /dev/null
+        
+        if command -v setfacl &>/dev/null; then
+            sudo setfacl -m u:${usuario}:rwx "$FTP_ROOT/$nuevo_grupo" 2>/dev/null
+            sudo setfacl -x u:${usuario} "$FTP_ROOT/$grupo_actual" 2>/dev/null
+        fi
+        print_completado "Montajes y permisos actualizados"
+    else
+        print_error "Error al cambiar el grupo del usuario"
+        return 1
+    fi
 }
 
 # ============================================================================
-# FUNCION: Validar nombre de usuario
+# FUNCIÓN: Gestionar usuarios FTP
 # ============================================================================
-function Validar-Usuario {
-    param([string]$usuario)
-
-    if ([string]::IsNullOrEmpty($usuario)) {
-        Print-Error "El nombre no puede estar vacio."; return $false
-    }
-    if ($usuario.Length -lt 3 -or $usuario.Length -gt 20) {
-        Print-Error "El nombre debe tener entre 3 y 20 caracteres."; return $false
-    }
-    if ($usuario -notmatch '^[a-zA-Z][a-zA-Z0-9_-]*$') {
-        Print-Error "Solo letras, numeros, - y _. Debe iniciar con letra."; return $false
-    }
-    if (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue) {
-        Print-Error "El usuario '$usuario' ya existe."; return $false
-    }
-    return $true
+gestionar_Usuarios() {
+    print_titulo "Gestión de Usuarios FTP"
+    
+    if ! verificar_Instalacion &>/dev/null; then
+        print_error "vsftpd no está instalado. Ejecute primero: $0 -i"
+        return 1
+    fi
+    
+    echo "Opciones:"
+    echo "  1) Crear nuevos usuarios"
+    echo "  2) Cambiar grupo de un usuario"
+    echo "  3) Eliminar usuario"
+    echo "  4) Volver"
+    echo ""
+    read -p "Seleccione una opción [1-4]: " opcion
+    
+    case $opcion in
+        1)
+            echo ""
+            read -p "¿Cuántos usuarios desea crear?: " num_usuarios
+            
+            if ! [[ "$num_usuarios" =~ ^[0-9]+$ ]] || [ "$num_usuarios" -lt 1 ]; then
+                print_error "Número de usuarios inválido"
+                return 1
+            fi
+            
+            for ((i=1; i<=num_usuarios; i++)); do
+                echo ""
+                print_titulo "Usuario $i de $num_usuarios"
+                
+                while true; do
+                    read -p "Nombre de usuario: " usuario
+                    if validar_Usuario "$usuario"; then break; fi
+                done
+                
+                while true; do
+                    read -s -p "Contraseña: " password
+                    echo ""
+                    if validar_Contrasena "$password"; then
+                        read -s -p "Confirmar contraseña: " password2
+                        echo ""
+                        if [ "$password" == "$password2" ]; then break
+                        else print_error "Las contraseñas no coinciden"; fi
+                    fi
+                done
+                
+                echo ""
+                echo "¿A qué grupo pertenece?"
+                echo "  1) $GRUPO_REPROBADOS"
+                echo "  2) $GRUPO_RECURSADORES"
+                read -p "Seleccione el grupo [1-2]: " grupo_opcion
+                
+                local grupo
+                case $grupo_opcion in
+                    1) grupo="$GRUPO_REPROBADOS" ;;
+                    2) grupo="$GRUPO_RECURSADORES" ;;
+                    *) grupo="$GRUPO_REPROBADOS" ;;
+                esac
+                
+                crear_Usuario_FTP "$usuario" "$password" "$grupo"
+            done
+            
+            echo ""
+            print_info "Reiniciando servicio vsftpd..."
+            sudo systemctl restart vsftpd
+            ;;
+            
+        2)
+            echo ""
+            listar_Usuarios_FTP
+            echo ""
+            read -p "Ingrese el nombre del usuario: " usuario
+            cambiar_Grupo_Usuario "$usuario"
+            
+            if [ $? -eq 0 ]; then
+                sudo systemctl restart vsftpd
+            fi
+            ;;
+            
+        3)
+            echo ""
+            listar_Usuarios_FTP
+            echo ""
+            read -p "Ingrese el nombre del usuario a eliminar: " usuario
+            
+            if ! id "$usuario" &>/dev/null; then
+                print_error "El usuario '$usuario' no existe"
+                return 1
+            fi
+            
+            read -p "¿Está seguro de eliminar el usuario '$usuario'? [s/N]: " confirmar
+            if [[ "$confirmar" =~ ^[Ss]$ ]]; then
+                local user_home="/home/ftp_users/$usuario"
+                local grupo_actual=$(id -gn "$usuario")
+                
+                # 1. Desmontar carpetas
+                sudo umount "$user_home/ftp/$usuario" 2>/dev/null
+                sudo umount "$user_home/ftp/general" 2>/dev/null
+                sudo umount "$user_home/ftp/$grupo_actual" 2>/dev/null
+                
+                # 2. Limpiar referencias de este usuario en fstab
+                sudo sed -i "\|$user_home/ftp|d" /etc/fstab
+                
+                # 3. Eliminar de la lista de vsftpd
+                sudo sed -i "/^$usuario$/d" /etc/vsftpd.user_list
+                
+                # 4. Eliminar directorio personal real en /srv/ftp
+                sudo rm -rf "$FTP_ROOT/_users/$usuario"
+                
+                # 5. Eliminar usuario del sistema (y su home virtual)
+                sudo userdel -r "$usuario" 2>/dev/null || sudo userdel "$usuario"
+                
+                print_completado "Usuario '$usuario' eliminado limpiamente"
+                sudo systemctl restart vsftpd
+            fi
+            ;;
+            
+        4) return 0 ;;
+        *) print_error "Opción inválida" ;;
+    esac
 }
 
 # ============================================================================
-# FUNCION: Crear usuario FTP
+# FUNCIÓN: Listar usuarios FTP
 # ============================================================================
-function Crear-Usuario-FTP {
-    param(
-        [string]$usuario,
-        [string]$password,
-        [string]$grupo
-    )
-
-    Print-Info "Creando usuario '$usuario' en grupo '$grupo'..."
-
-    # Crear usuario local del sistema
-    $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-    try {
-        New-LocalUser -Name $usuario -Password $securePass `
-            -PasswordNeverExpires `
-            -UserMayNotChangePassword `
-            -Description "Usuario FTP - $grupo" | Out-Null
-        Print-Ok "Usuario del sistema creado."
-    } catch {
-        Print-Error "Error al crear usuario '$usuario': $_"
-        return $false
-    }
-
-    Start-Sleep -Seconds 1
-
-    # Otorgar derecho de logon local (requerido por IIS FTP)
-    Grant-FTPLogonRight -Username $usuario
-
-    # Agregar al grupo
-    $otroGrupo = if ($grupo -eq $GRUPO_REPROBADOS) { $GRUPO_RECURSADORES } else { $GRUPO_REPROBADOS }
-    Remove-LocalGroupMember -Group $otroGrupo -Member $usuario -ErrorAction SilentlyContinue
-    Add-LocalGroupMember    -Group $grupo      -Member $usuario -ErrorAction SilentlyContinue
-    Print-Ok "Usuario agregado al grupo '$grupo'."
-
-    # Construir jaula con Virtual Directories
-    Construir-Jaula-Usuario -usuario $usuario -grupo $grupo
-
-    Write-Host ""
-    Print-Ok "═══════════════════════════════════════════"
-    Print-Ok "  Usuario '$usuario' creado correctamente"
-    Print-Ok "═══════════════════════════════════════════"
-    Print-Info "  Estructura al conectar por FTP:"
-    Print-Info "    /general/      (publica, todos leen y escriben)"
-    Print-Info "    /$grupo/       (solo tu grupo)"
-    Print-Info "    /$usuario/     (personal)"
-    Print-Ok "═══════════════════════════════════════════"
-
-    return $true
+listar_Usuarios_FTP() {
+    print_titulo "Usuarios FTP Configurados"
+    
+    if [ ! -s /etc/vsftpd.user_list ]; then
+        print_info "No hay usuarios FTP configurados"
+        return 0
+    fi
+    
+    printf "%-20s %-20s %-30s\n" "USUARIO" "GRUPO" "HOME VIRTUAL"
+    echo "----------------------------------------------------------------------"
+    
+    while IFS= read -r usuario; do
+        if id "$usuario" &>/dev/null; then
+            local grupo=$(id -gn "$usuario")
+            local dir="/home/ftp_users/$usuario/ftp"
+            printf "%-20s %-20s %-30s\n" "$usuario" "$grupo" "$dir"
+        fi
+    done < /etc/vsftpd.user_list
+    echo ""
 }
 
 # ============================================================================
-# FUNCION: Cambiar usuario de grupo
+# FUNCIÓN: Listar estructura FTP
 # ============================================================================
-function Cambiar-Grupo-Usuario {
-    param([string]$usuario)
-
-    if (-not (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue)) {
-        Print-Error "El usuario '$usuario' no existe."
-        return
-    }
-
-    # Detectar grupo actual
-    $grupoActual = $null
-    foreach ($g in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
-        $miembros = Get-LocalGroupMember -Group $g -ErrorAction SilentlyContinue
-        if ($miembros | Where-Object { ($_.Name -replace "^.*\\","") -eq $usuario }) {
-            $grupoActual = $g
-            break
-        }
-    }
-
-    Print-Info "Grupo actual de '$usuario': $(if ($grupoActual) { $grupoActual } else { '(ninguno)' })"
-
-    Write-Host ""
-    Write-Host "  Nuevo grupo:"
-    Write-Host "  1) $GRUPO_REPROBADOS"
-    Write-Host "  2) $GRUPO_RECURSADORES"
-    $opcion = Read-Host "Seleccione [1-2]"
-
-    $nuevoGrupo = switch ($opcion) {
-        "1" { $GRUPO_REPROBADOS }
-        "2" { $GRUPO_RECURSADORES }
-        default { Print-Error "Opcion invalida."; return }
-    }
-
-    if ($grupoActual -eq $nuevoGrupo) {
-        Print-Info "El usuario ya pertenece a '$nuevoGrupo'."
-        return
-    }
-
-    Print-Info "Cambiando '$usuario': '$grupoActual' -> '$nuevoGrupo'..."
-
-    # Cambiar grupo local
-    if ($grupoActual) {
-        Remove-LocalGroupMember -Group $grupoActual -Member $usuario -ErrorAction SilentlyContinue
-        Print-Ok "Removido de '$grupoActual'."
-    }
-    Add-LocalGroupMember -Group $nuevoGrupo -Member $usuario -ErrorAction SilentlyContinue
-    Print-Ok "Agregado a '$nuevoGrupo'."
-
-    # Actualizar junctions: eliminar la del grupo viejo y crear la nueva
-    $jaula = "$FTP_ROOT\LocalUser\$usuario"
-
-    if ($grupoActual) {
-        $juncViejo = "$jaula\$grupoActual"
-        if (Test-Path $juncViejo) {
-            cmd /c "rmdir `"$juncViejo`"" | Out-Null
-            Print-Ok "Junction '$grupoActual' eliminado."
-        }
-    }
-
-    $juncNuevo = "$jaula\$nuevoGrupo"
-    if (-not (Test-Path $juncNuevo)) {
-        cmd /c "mklink /J `"$juncNuevo`" `"$FTP_ROOT\LocalUser\$nuevoGrupo`"" | Out-Null
-        Print-Ok "Junction '$nuevoGrupo' creado."
-    }
-
-    Print-Ok "Usuario '$usuario' movido a '$nuevoGrupo'."
-    Print-Info "Nueva estructura FTP:"
-    Print-Info "  /general/       (publica)"
-    Print-Info "  /$nuevoGrupo/   (nuevo grupo)"
-    Print-Info "  /$usuario/      (personal)"
+listar_Estructura() {
+    print_titulo "Estructura del Servidor FTP"
+    if [ ! -d "$FTP_ROOT" ]; then
+        print_error "El directorio FTP no existe: $FTP_ROOT"
+        return 1
+    fi
+    
+    print_info "Raíz FTP: $FTP_ROOT"
+    if command -v tree &>/dev/null; then
+        sudo tree -L 2 -p -u -g "$FTP_ROOT"
+    else
+        sudo find "$FTP_ROOT" -maxdepth 2 -type d -exec ls -ld {} \;
+    fi
+    echo ""
+    listar_Usuarios_FTP
 }
 
 # ============================================================================
-# FUNCION: Instalar y configurar servidor FTP completo
+# FUNCIÓN: Reiniciar servicio FTP
 # ============================================================================
-function Instalar-FTP {
-    Print-Titulo "Instalacion y Configuracion de Servidor FTP"
-
-    if (Verificar-Instalacion) {
-        $reconf = Read-Host "IIS y FTP ya instalados. Reconfigurar? [s/N]"
-        if ($reconf -notmatch '^[Ss]$') { Print-Info "Cancelado."; return }
-    } else {
-        Print-Info "Instalando IIS y FTP Service..."
-        $result = Install-WindowsFeature -Name Web-Server, Web-Ftp-Server, Web-Ftp-Service, Web-Mgmt-Console `
-            -IncludeManagementTools
-        if ($result.Success) { Print-Ok "IIS y FTP instalados." }
-        else { Print-Error "Error en la instalacion."; return }
-    }
-
-    Import-Module WebAdministration -ErrorAction Stop
-
-    Crear-Grupos
-    Crear-Estructura-Base
-    Configurar-FTP
-    Configurar-Firewall
-
-    $ip = (Get-NetIPAddress -AddressFamily IPv4 |
-        Where-Object { $_.IPAddress -ne "127.0.0.1" } |
-        Select-Object -First 1).IPAddress
-
-    Write-Host ""
-    Print-Ok "══════════════════════════════════════════════"
-    Print-Ok "  Servidor FTP listo"
-    Print-Ok "══════════════════════════════════════════════"
-    Print-Info "  IP     : $ip"
-    Print-Info "  Puerto : 21"
-    Print-Info "  Anon   : ftp://$ip  (solo lectura en /general)"
-    Print-Ok "══════════════════════════════════════════════"
-    Print-Info "Cree usuarios con: .\ftp_server.ps1 -users"
+reiniciar_FTP() {
+    print_info "Reiniciando servidor FTP..."
+    sudo systemctl restart vsftpd
+    if systemctl is-active --quiet vsftpd; then
+        print_completado "Servidor vsftpd reiniciado correctamente"
+    else
+        print_error "Error al reiniciar. Ejecute: sudo journalctl -xeu vsftpd.service"
+    fi
 }
 
 # ============================================================================
-# FUNCION: Gestionar usuarios FTP
+# FUNCIÓN: Ver estado del servidor
 # ============================================================================
-function Gestionar-Usuarios {
-    Print-Titulo "Gestion de Usuarios FTP"
-
-    if (-not (Verificar-Instalacion)) {
-        Print-Error "IIS/FTP no instalado. Ejecute: .\ftp_server.ps1 -install"
-        return
-    }
-
-    Import-Module WebAdministration -ErrorAction SilentlyContinue
-
-    Write-Host "  1) Crear nuevos usuarios"
-    Write-Host "  2) Cambiar grupo de un usuario"
-    Write-Host "  3) Eliminar usuario"
-    Write-Host "  4) Cambiar contrasena de usuario"
-    Write-Host "  5) Volver"
-    Write-Host ""
-    $opcion = Read-Host "Seleccione [1-5]"
-
-    switch ($opcion) {
-        "1" {
-            $num = Read-Host "Cuantos usuarios desea crear?"
-            if (-not ($num -match '^\d+$') -or [int]$num -lt 1) {
-                Print-Error "Numero invalido."; return
-            }
-
-            for ($i = 1; $i -le [int]$num; $i++) {
-                Write-Host ""
-                Print-Titulo "Usuario $i de $num"
-
-                do { $usuario = (Read-Host "Nombre de usuario").Trim() } `
-                    while (-not (Validar-Usuario -usuario $usuario))
-
-                do { $password = (Read-Host "Contrasena").Trim() } `
-                    while ([string]::IsNullOrWhiteSpace($password))
-
-                Write-Host "  1) $GRUPO_REPROBADOS"
-                Write-Host "  2) $GRUPO_RECURSADORES"
-                $gOp = Read-Host "Grupo [1-2]"
-                $grupo = switch ($gOp) {
-                    "1" { $GRUPO_REPROBADOS }
-                    "2" { $GRUPO_RECURSADORES }
-                    default { Print-Warn "Opcion invalida, asignando a reprobados."; $GRUPO_REPROBADOS }
-                }
-
-                Crear-Usuario-FTP -usuario $usuario -password $password -grupo $grupo
-            }
-        }
-
-        "2" {
-            Listar-Usuarios-FTP
-            $usuario = (Read-Host "Usuario a cambiar de grupo").Trim()
-            Cambiar-Grupo-Usuario -usuario $usuario
-        }
-
-        "3" {
-            Listar-Usuarios-FTP
-            $usuario = (Read-Host "Usuario a eliminar").Trim()
-            if (-not (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue)) {
-                Print-Error "Usuario '$usuario' no existe."; return
-            }
-            $confirmar = Read-Host "Confirma eliminar '$usuario'? [s/N]"
-            if ($confirmar -match '^[Ss]$') {
-                Destruir-Jaula-Usuario -usuario $usuario
-                Remove-LocalUser -Name $usuario -ErrorAction SilentlyContinue
-                Print-Ok "Usuario '$usuario' eliminado."
-            } else { Print-Info "Cancelado." }
-        }
-
-        "4" {
-            Listar-Usuarios-FTP
-            $usuario = (Read-Host "Nombre del usuario").Trim()
-            if (-not (Get-LocalUser -Name $usuario -ErrorAction SilentlyContinue)) {
-                Print-Error "Usuario '$usuario' no existe."; return
-            }
-            $newPass = (Read-Host "Nueva contrasena").Trim()
-            $secPass = ConvertTo-SecureString $newPass -AsPlainText -Force
-            Set-LocalUser -Name $usuario -Password $secPass
-            Print-Ok "Contrasena de '$usuario' actualizada."
-        }
-
-        "5" { return }
-        default { Print-Error "Opcion invalida." }
-    }
+ver_Estado() {
+    print_titulo "ESTADO DEL SERVIDOR FTP"
+    sudo systemctl status vsftpd --no-pager
+    echo ""
+    print_info "Conexiones FTP activas:"
+    sudo ss -tnp | grep :21 || echo "  No hay conexiones activas"
 }
 
 # ============================================================================
-# FUNCION: Listar usuarios FTP
+# VERIFICAR PERMISOS DE ROOT
 # ============================================================================
-function Listar-Usuarios-FTP {
-    Print-Titulo "Usuarios FTP Configurados"
-
-    $usuarios = @()
-    foreach ($grupo in @($GRUPO_REPROBADOS, $GRUPO_RECURSADORES)) {
-        $miembros = Get-LocalGroupMember -Group $grupo -ErrorAction SilentlyContinue
-        foreach ($m in $miembros) {
-            $nombre = $m.Name -replace ".*\\", ""
-            $jaulaOk = Test-Path "$FTP_ROOT\LocalUser\$nombre"
-            $usuarios += [PSCustomObject]@{
-                Usuario  = $nombre
-                Grupo    = $grupo
-                Jaula    = if ($jaulaOk) { "OK" } else { "FALTA" }
-            }
-        }
-    }
-
-    if ($usuarios.Count -eq 0) { Print-Info "No hay usuarios FTP configurados."; return }
-    $usuarios | Format-Table -AutoSize
-}
+if [[ $EUID -ne 0 ]]; then
+    print_error "Este script debe ejecutarse como root o con sudo"
+    exit 1
+fi
 
 # ============================================================================
-# FUNCION: Ver estado del servidor
+# PROCESAMIENTO DE ARGUMENTOS
 # ============================================================================
-function Ver-Estado {
-    Print-Titulo "ESTADO DEL SERVIDOR FTP"
-
-    Import-Module WebAdministration -ErrorAction SilentlyContinue
-
-    # Servicio
-    $svc = Get-Service -Name "ftpsvc" -ErrorAction SilentlyContinue
-    if ($svc) {
-        $color = if ($svc.Status -eq "Running") { "Green" } else { "Red" }
-        Write-Host "  Servicio ftpsvc : " -NoNewline
-        Write-Host $svc.Status -ForegroundColor $color
-    }
-
-    # Sitio
-    $estado = & "$env:SystemRoot\System32\inetsrv\appcmd.exe" list site $FTP_SITE_NAME 2>$null
-    Write-Host "  Sitio IIS       : $estado"
-
-    # Isolation mode
-    $isolation = (Get-ItemProperty "IIS:\Sites\$FTP_SITE_NAME" `
-        -Name "ftpServer.userIsolation.mode" -ErrorAction SilentlyContinue).Value
-    $isoText = switch ($isolation) {
-        3 { "IsolateAllDirectories (correcto)" }
-        0 { "Sin aislamiento (incorrecto)" }
-        default { "Modo $isolation" }
-    }
-    Write-Host "  User Isolation  : $isoText"
-
-    Write-Host ""
-    Print-Info "Conexiones activas en puerto 21:"
-    netstat -an | Select-String ":21 "
-
-    Write-Host ""
-    Listar-Usuarios-FTP
-}
-
-# ============================================================================
-# FUNCION: Reiniciar FTP
-# ============================================================================
-function Reiniciar-FTP {
-    Print-Info "Reiniciando servidor FTP..."
-    Stop-Service ftpsvc -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-    Start-Service ftpsvc
-    Start-Sleep -Seconds 2
-    & "$env:SystemRoot\System32\inetsrv\appcmd.exe" start site $FTP_SITE_NAME
-    Print-Ok "Servidor FTP reiniciado."
-}
-
-# ============================================================================
-# FUNCION: Mostrar ayuda
-# ============================================================================
-function Mostrar-Ayuda {
-    Write-Host ""
-    Write-Host "Uso: .\ftp_server.ps1 [opcion]" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  -install   Instala y configura el servidor FTP (primera vez)"
-    Write-Host "  -users     Gestionar usuarios (crear, cambiar grupo, eliminar)"
-    Write-Host "  -status    Ver estado del servidor y usuarios"
-    Write-Host "  -restart   Reiniciar el servicio FTP"
-    Write-Host "  -verify    Verificar si IIS y FTP estan instalados"
-    Write-Host "  -list      Listar usuarios y estructura"
-    Write-Host "  -help      Mostrar esta ayuda"
-    Write-Host ""
-    Write-Host "Orden recomendado (primera vez):" -ForegroundColor Yellow
-    Write-Host "  1. .\ftp_server.ps1 -install"
-    Write-Host "  2. .\ftp_server.ps1 -users"
-    Write-Host ""
-}
-
-# ============================================================================
-# ENTRY POINT
-# ============================================================================
-if     ($verify)  { Verificar-Instalacion }
-elseif ($install) { Instalar-FTP }
-elseif ($users)   { Gestionar-Usuarios }
-elseif ($restart) { Reiniciar-FTP }
-elseif ($status)  { Ver-Estado }
-elseif ($list)    { Listar-Usuarios-FTP }
-elseif ($help)    { Mostrar-Ayuda }
-else              { Mostrar-Ayuda }
+case $1 in
+    -v | --verify)  verificar_Instalacion ;;
+    -i | --install) instalar_FTP ;;
+    -u | --users)   gestionar_Usuarios ;;
+    -s | --status)  ver_Estado ;;
+    -r | --restart) reiniciar_FTP ;;
+    -l | --list)    listar_Estructura ;;
+    -? | --help)    ayuda ;;
+    *)              ayuda ;;
+esac
