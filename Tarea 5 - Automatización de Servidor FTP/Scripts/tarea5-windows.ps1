@@ -8,8 +8,8 @@
 
 # Cargar librerías compartidas
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../lib/utils.sh"
-source "$SCRIPT_DIR/../lib/validaciones.sh"
+source "$SCRIPT_DIR/utils.sh"
+source "$SCRIPT_DIR/validaciones.sh"
 
 # Variables Globales
 readonly PAQUETE="vsftpd"
