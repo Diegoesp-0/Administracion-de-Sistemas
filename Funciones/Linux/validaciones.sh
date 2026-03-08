@@ -132,3 +132,34 @@ validar_Dominio() {
     
     return 0
 }
+
+validar_puerto() {
+    local puerto="$1"
+    shift
+    local reservados=("$@")
+
+    if ! [[ "$puerto" =~ ^[0-9]+$ ]]; then
+        echo -e "${rojo}'$puerto' no es un numero valido.${nc}"
+        return 1
+    fi
+
+    if (( puerto < 1 || puerto > 65535 )); then
+        echo -e "${rojo}El puerto debe estar entre 1 y 65535.${nc}"
+        return 1
+    fi
+
+    for r in "${reservados[@]}"; do
+        if [[ "$puerto" -eq "$r" ]]; then
+            echo -e "${rojo}Puerto $puerto reservado para otro servicio.${nc}"
+            return 1
+        fi
+    done
+
+    if ss -tulnp 2>/dev/null | grep -q ":${puerto} "; then
+        echo -e "${rojo}El puerto $puerto ya esta en uso por otro proceso.${nc}"
+        ss -tulnp 2>/dev/null | grep ":${puerto} " | awk '{print "  " $7}'
+        return 1
+    fi
+
+    return 0
+}
