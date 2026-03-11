@@ -297,10 +297,16 @@ function Instalar-Apache-Win {
     $httpdConf  = "$confDir\httpd.conf"
     $apacheRoot = Split-Path $confDir -Parent
 
+    # Detener Apache antes de modificar config
+    $svcPrev = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
+    if ($svcPrev) { Stop-Service $svcPrev.Name -Force -ErrorAction SilentlyContinue }
+
     $contenido = Get-Content $httpdConf -Raw
-    $contenido = $contenido -replace 'Listen 80', "Listen $global:PUERTO_ELEGIDO"
+    $contenido = $contenido -replace 'Listen \d+', "Listen $global:PUERTO_ELEGIDO"
+    $contenido = $contenido -replace '(?s)# TAREA6-SECURITY-START.*# TAREA6-SECURITY-END\r?\n', ''
     $contenido += @"
 
+# TAREA6-SECURITY-START
 ServerTokens Prod
 ServerSignature Off
 
@@ -312,6 +318,7 @@ ServerSignature Off
 <LimitExcept GET POST HEAD OPTIONS>
     Require all denied
 </LimitExcept>
+# TAREA6-SECURITY-END
 "@
     Set-Content $httpdConf $contenido -Encoding UTF8
     Write-Ok "Puerto y seguridad configurados."
