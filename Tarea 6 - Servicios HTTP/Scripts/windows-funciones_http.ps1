@@ -84,11 +84,12 @@ function Obtener-Versiones-Choco {
     param([string]$paquete)
     Asegurar-Chocolatey
 
+    # choco devuelve versiones de mayor a menor, tomar las 5 mas recientes
     $versiones = choco search $paquete --exact --all-versions --limit-output 2>$null `
         | ForEach-Object { ($_ -split '\|')[1] } `
         | Where-Object   { $_ -match '^\d+\.\d+' } `
-        | Sort-Object    { [version]($_ -replace '[^0-9.]','') } `
-        | Select-Object  -Unique
+        | Select-Object  -Unique `
+        | Select-Object  -First 5
 
     return $versiones
 }
