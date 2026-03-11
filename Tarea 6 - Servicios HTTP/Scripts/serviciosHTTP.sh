@@ -2,8 +2,8 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-source "$SCRIPT_DIR/../../../Funciones/Linux/colores.sh"
-source "$SCRIPT_DIR/../../../Funciones/Linux/validaciones.sh"
+source "$SCRIPT_DIR/../../Funciones/Linux/colores.sh"
+source "$SCRIPT_DIR/../../Funciones/Linux/validaciones.sh"
 source "$SCRIPT_DIR/funciones_http.sh"
 
 readonly INTERFAZ_RED="enp0s9"
