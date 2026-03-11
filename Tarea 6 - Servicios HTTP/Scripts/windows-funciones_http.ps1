@@ -30,8 +30,8 @@ function Asegurar-Chocolatey {
 
 # =============== REFRESCAR PATH ===============
 function Refrescar-Path {
-    $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
-                [System.Environment]::GetEnvironmentVariable("PATH","User")
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+                [System.Environment]::GetEnvironmentVariable("Path","User")
 }
 
 # =============== BUSCAR RUTA NGINX ===============
@@ -52,44 +52,19 @@ function Obtener-Ruta-Nginx {
     return $null
 }
 
-# =============== BUSCAR RUTA APACHE ===============
-function Obtener-Ruta-Apache {
-    # choco instala apache-httpd en AppData\Roaming\Apache24
-    $rutas = @(
-        "$env:APPDATA\Apache24\conf",
-        "C:\Apache24\conf",
-        "C:\tools\Apache24\conf"
-    )
-    foreach ($r in $rutas) {
-        if (Test-Path "$r\httpd.conf") { return $r }
-    }
-
-    $conf = Get-ChildItem $env:APPDATA -Filter "httpd.conf" `
-        -Recurse -ErrorAction SilentlyContinue -Depth 4 |
-        Where-Object { $_.FullName -notmatch "\\original\\" } |
-        Select-Object -First 1
-    if ($conf) { return $conf.DirectoryName }
-
-    $conf = Get-ChildItem "C:\ProgramData" -Filter "httpd.conf" `
-        -Recurse -ErrorAction SilentlyContinue -Depth 6 |
-        Where-Object { $_.FullName -notmatch "\\original\\" } |
-        Select-Object -First 1
-    if ($conf) { return $conf.DirectoryName }
-
-    return $null
-}
-
-# =============== OBTENER VERSIONES ===============
+# =============== OBTENER VERSIONES CHOCO ===============
 function Obtener-Versiones-Choco {
     param([string]$paquete)
     Asegurar-Chocolatey
 
-    # choco devuelve versiones de mayor a menor, tomar las 5 mas recientes
+    # choco search devuelve de mayor a menor, tomar las 5 mas recientes
     $versiones = choco search $paquete --exact --all-versions --limit-output 2>$null `
-        | ForEach-Object { ($_ -split '\|')[1] } `
-        | Where-Object   { $_ -match '^\d+\.\d+' } `
-        | Select-Object  -Unique `
-        | Select-Object  -First 5
+        | ForEach-Object {
+            if ($_ -match '\|') { ($_ -split '\|')[1].Trim() }
+        } `
+        | Where-Object { $_ -match '^\d+\.\d+' } `
+        | Select-Object -Unique `
+        | Select-Object -First 5
 
     return $versiones
 }
@@ -101,32 +76,36 @@ function Obtener-Versiones-IIS {
     return @("10.0")
 }
 
-# =============== ELEGIR VERSION ===============
-function Elegir-Version {
-    param([string]$servidor, [string[]]$versiones)
+# =============== ELEGIR VERSION APACHE ===============
+function Elegir-Version-Apache {
+    param([string[]]$versiones)
     Clear-Host
 
     if ($versiones.Count -eq 0) {
-        Write-Err "No se encontraron versiones para '$servidor'."
+        Write-Err "No se encontraron versiones para Apache."
         return $false
     }
 
     Write-Host ""
-    Write-Host "=== Versiones disponibles: $servidor ==="
+    Write-Host "=== Versiones disponibles: Apache2 ==="
     Write-Host ""
 
-    for ($i = 0; $i -lt $versiones.Count; $i++) {
-        $etiqueta = ""
-        if ($i -eq 0)                    { $etiqueta = "  [LTS / Estable]" }
-        if ($i -eq $versiones.Count - 1) { $etiqueta = "  [Latest / Desarrollo]" }
+    # choco ya devuelve de mayor a menor: [0]=latest, [1]=estable, [2]=LTS
+    $limite = [Math]::Min($versiones.Count, 3)
+    for ($i = 0; $i -lt $limite; $i++) {
+        $etiqueta = switch ($i) {
+            0 { "  [Latest - Desarrollo]" }
+            1 { "  [Estable anterior]"    }
+            2 { "  [LTS]"                 }
+        }
         Write-Host "  [$($i+1)] $($versiones[$i])$etiqueta"
     }
     Write-Host ""
 
     while ($true) {
-        $sel = Read-Host "Elige una version [1-$($versiones.Count)]"
+        $sel = Read-Host "Elige una version [1-$limite]"
         $sel = $sel -replace '[^0-9]',''
-        if ($sel -match '^\d+$' -and [int]$sel -ge 1 -and [int]$sel -le $versiones.Count) {
+        if ($sel -match '^\d+$' -and [int]$sel -ge 1 -and [int]$sel -le $limite) {
             $global:VERSION_ELEGIDA = $versiones[[int]$sel - 1]
             Write-Ok "Version elegida: $global:VERSION_ELEGIDA"
             return $true
@@ -135,12 +114,70 @@ function Elegir-Version {
     }
 }
 
+# =============== ELEGIR VERSION NGINX ===============
+function Elegir-Version-Nginx {
+    param([string[]]$versiones)
+    Clear-Host
+
+    if ($versiones.Count -eq 0) {
+        Write-Err "No se encontraron versiones para Nginx."
+        return $false
+    }
+
+    # Separar mainline (menor impar) de stable (menor par)
+    $mainline = $versiones | Where-Object {
+        $p = $_ -split '\.'
+        $p.Count -ge 2 -and ([int]$p[1] % 2 -ne 0)
+    } | Select-Object -First 1
+
+    $stable = $versiones | Where-Object {
+        $p = $_ -split '\.'
+        $p.Count -ge 2 -and ([int]$p[1] % 2 -eq 0)
+    } | Select-Object -First 1
+
+    if (-not $mainline) { $mainline = $versiones[0] }
+    if (-not $stable)   { $stable   = if ($versiones.Count -ge 2) { $versiones[1] } else { $versiones[0] } }
+
+    Write-Host ""
+    Write-Host "=== Versiones disponibles: Nginx ==="
+    Write-Host ""
+    Write-Host "  [1] $mainline  [Mainline - Desarrollo]"
+    Write-Host "  [2] $stable    [Stable - LTS]"
+    Write-Host ""
+
+    while ($true) {
+        $sel = Read-Host "Elige una version [1-2]"
+        $sel = $sel -replace '[^0-9]',''
+        switch ($sel) {
+            "1" { $global:VERSION_ELEGIDA = $mainline; Write-Ok "Version elegida: $mainline"; return $true }
+            "2" { $global:VERSION_ELEGIDA = $stable;   Write-Ok "Version elegida: $stable";   return $true }
+            default { Write-Err "Opcion invalida." }
+        }
+    }
+}
+
+# =============== ELEGIR VERSION IIS ===============
+function Elegir-Version-IIS {
+    param([string[]]$versiones)
+    Clear-Host
+
+    Write-Host ""
+    Write-Host "=== Version disponible: IIS ==="
+    Write-Host ""
+    Write-Host "  [1] $($versiones[0])  [Segun version de Windows]"
+    Write-Host ""
+
+    $global:VERSION_ELEGIDA = $versiones[0]
+    Write-Ok "Version: $global:VERSION_ELEGIDA"
+    return $true
+}
+
 # =============== VALIDAR PUERTO ===============
 function Validar-Puerto {
     param([int]$puerto)
 
-    if ($puerto -lt 1 -or $puerto -gt 65535) {
-        Write-Err "El puerto debe estar entre 1 y 65535."
+    if ($puerto -ne 80 -and ($puerto -lt 1024 -or $puerto -gt 65535)) {
+        Write-Err "Usa 80 o un puerto entre 1024 y 65535."
         return $false
     }
     foreach ($r in $global:PUERTOS_RESERVADOS) {
@@ -149,10 +186,10 @@ function Validar-Puerto {
             return $false
         }
     }
-    $cx = Test-NetConnection -ComputerName localhost -Port $puerto `
-        -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-    if ($cx.TcpTestSucceeded) {
-        Write-Err "El puerto $puerto ya esta en uso."
+    $enUso = Get-NetTCPConnection -LocalPort $puerto -ErrorAction SilentlyContinue
+    if ($enUso) {
+        $proc = Get-Process -Id $enUso[0].OwningProcess -ErrorAction SilentlyContinue
+        Write-Err "Puerto $puerto ocupado por: $($proc.ProcessName) (PID $($enUso[0].OwningProcess))"
         return $false
     }
     return $true
@@ -187,15 +224,12 @@ function Pedir-Puerto {
 # =============== FIREWALL ===============
 function Abrir-Puerto-Firewall {
     param([int]$puerto, [string]$nombre)
-    $existe = Get-NetFirewallRule -DisplayName "HTTP-$nombre-$puerto" -ErrorAction SilentlyContinue
-    if (-not $existe) {
-        New-NetFirewallRule -DisplayName "HTTP-$nombre-$puerto" `
-            -Direction Inbound -Protocol TCP -LocalPort $puerto `
-            -Action Allow -Profile Any | Out-Null
-        Write-Ok "Firewall: puerto $puerto abierto."
-    } else {
-        Write-Info "Firewall: regla para puerto $puerto ya existe."
-    }
+    # Eliminar regla anterior si existe
+    Remove-NetFirewallRule -DisplayName "HTTP-$nombre-*" -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName "HTTP-$nombre-$puerto" `
+        -Direction Inbound -Protocol TCP -LocalPort $puerto `
+        -Action Allow -Profile Any | Out-Null
+    Write-Ok "Firewall: puerto $puerto abierto para $nombre."
 }
 
 # =============== INSTALAR IIS ===============
@@ -216,6 +250,7 @@ function Instalar-IIS {
     & $appcmd set site "Default Web Site" /bindings:"http/*:$($global:PUERTO_ELEGIDO):" 2>&1 | Out-Null
     Write-Ok "Puerto configurado -> $global:PUERTO_ELEGIDO"
 
+    # Seguridad via web.config (compatible con Core, sin WebAdministration)
     Set-Content -Path "$global:IIS_WEBROOT\web.config" -Encoding UTF8 -Value @"
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
@@ -224,7 +259,7 @@ function Instalar-IIS {
       <requestFiltering removeServerHeader="true">
         <verbs>
           <add verb="TRACE" allowed="false" />
-          <add verb="DELETE" allowed="false" />
+          <add verb="TRACK" allowed="false" />
         </verbs>
       </requestFiltering>
     </security>
@@ -240,7 +275,7 @@ function Instalar-IIS {
 "@
     Write-Ok "Seguridad configurada."
 
-    Set-Content -Path "$global:IIS_WEBROOT\index.html" -Encoding UTF8 -Value @"
+    Set-Content -Path "$global:IIS_WEBROOT\index.html" -Encoding UTF8 -Force -Value @"
 <!DOCTYPE html>
 <html lang="es">
 <head><meta charset="UTF-8"><title>IIS</title></head>
@@ -273,56 +308,61 @@ function Instalar-IIS {
     }
 }
 
-# =============== INSTALAR APACHE WINDOWS ===============
+# =============== INSTALAR APACHE ===============
 function Instalar-Apache-Win {
     Write-Title "Instalando Apache2 (Windows)..."
 
     Asegurar-Chocolatey
-    Write-Info "Instalando Apache $global:VERSION_ELEGIDA via Chocolatey..."
-    choco install apache-httpd --version=$global:VERSION_ELEGIDA -y --no-progress 2>&1 | Out-Null
-    Refrescar-Path
-    Write-Ok "Apache instalado."
+    Write-Info "Instalando Apache $global:VERSION_ELEGIDA en puerto $global:PUERTO_ELEGIDO via Chocolatey..."
 
-    $confDir = Obtener-Ruta-Apache
-    if (-not $confDir) {
-        Write-Err "No se encontro httpd.conf tras la instalacion."
+    # Pasar el puerto directamente al instalador para evitar editar httpd.conf manualmente
+    choco install apache-httpd `
+        --version="$global:VERSION_ELEGIDA" `
+        --params="`"/port:$global:PUERTO_ELEGIDO /installLocation:C:\Apache24`"" `
+        --yes `
+        --no-progress `
+        --force 2>&1 | Out-Null
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Fallo la instalacion de Apache. Codigo: $LASTEXITCODE"
         return
     }
 
-    $httpdConf  = "$confDir\httpd.conf"
-    $apacheRoot = Split-Path $confDir -Parent
+    Refrescar-Path
+    Write-Ok "Apache $global:VERSION_ELEGIDA instalado."
 
-    # Detener Apache antes de modificar config
-    $svcApache = Get-Service -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
-    if ($svcApache) {
-        Stop-Service $svcApache.Name -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
+    # Apache queda en C:\Apache24 por el installLocation
+    $apacheRoot = "C:\Apache24"
+    $httpdConf  = "$apacheRoot\conf\httpd.conf"
+
+    if (-not (Test-Path $httpdConf)) {
+        Write-Err "No se encontro httpd.conf en $apacheRoot\conf"
+        return
     }
 
-    # Reemplazar cualquier puerto Listen y agregar seguridad (sin duplicar)
+    # Seguridad: agregar bloque si no existe ya
     $contenido = Get-Content $httpdConf -Raw
-    $contenido = $contenido -replace 'Listen \d+', "Listen $global:PUERTO_ELEGIDO"
-    $contenido = $contenido -replace '(?s)# TAREA6-SECURITY-START.*?# TAREA6-SECURITY-END\r?\n?', ''
-    $contenido += @"
+    if ($contenido -notmatch 'TAREA6-SECURITY') {
+        Add-Content -Path $httpdConf -Value @"
 
 # TAREA6-SECURITY-START
 ServerTokens Prod
 ServerSignature Off
 
-<IfModule mod_headers.c>
-    Header always set X-Frame-Options "SAMEORIGIN"
-    Header always set X-Content-Type-Options "nosniff"
-</IfModule>
-
-<LimitExcept GET POST HEAD OPTIONS>
+<LimitExcept GET POST HEAD>
     Require all denied
 </LimitExcept>
+
+Header always set X-Frame-Options "SAMEORIGIN"
+Header always set X-Content-Type-Options "nosniff"
 # TAREA6-SECURITY-END
 "@
-    Set-Content $httpdConf $contenido -Encoding UTF8
-    Write-Ok "Puerto y seguridad configurados."
+        Write-Ok "Seguridad configurada en httpd.conf."
+    } else {
+        Write-Info "Seguridad ya configurada, omitiendo."
+    }
 
+    # index.html
     $htmlDir = "$apacheRoot\htdocs"
     New-Item -ItemType Directory -Force -Path $htmlDir | Out-Null
     Set-Content -Path "$htmlDir\index.html" -Encoding UTF8 -Force -Value @"
@@ -340,69 +380,94 @@ ServerSignature Off
 
     Abrir-Puerto-Firewall $global:PUERTO_ELEGIDO "Apache"
 
-    $httpdExe = "$apacheRoot\bin\httpd.exe"
-    if (-not (Test-Path $httpdExe)) {
-        Write-Err "No se encontro httpd.exe en $apacheRoot\bin"
-        return
-    }
-
-    # Registrar servicio solo si no existe
-    $svcApache = Get-Service -ErrorAction SilentlyContinue |
+    # Arrancar servicio (choco ya lo registra)
+    $svc = Get-Service -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
-    if (-not $svcApache) {
-        & $httpdExe -k install 2>&1 | Out-Null
-        Start-Sleep -Seconds 1
-        $svcApache = Get-Service -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
-    }
 
-    if ($svcApache) {
-        Start-Service $svcApache.Name -ErrorAction SilentlyContinue
+    if ($svc) {
+        Start-Service $svc.Name -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 3
-        $svcApache = Get-Service $svcApache.Name -ErrorAction SilentlyContinue
-        if ($svcApache.Status -eq "Running") {
+        $svc = Get-Service $svc.Name -ErrorAction SilentlyContinue
+        if ($svc.Status -eq "Running") {
             Write-Ok "Apache activo en puerto $global:PUERTO_ELEGIDO"
         } else {
-            Write-Err "Apache no arranco. Revisa $apacheRoot\logs\error.log"
+            Write-Err "Apache no arranco. Revisa C:\Apache24\logs\error.log"
         }
     } else {
-        Write-Err "No se encontro servicio Apache tras instalar."
+        # Si choco no registro el servicio, registrar manualmente
+        $httpdExe = "$apacheRoot\bin\httpd.exe"
+        if (Test-Path $httpdExe) {
+            & $httpdExe -k install 2>&1 | Out-Null
+            Start-Sleep -Seconds 1
+            $svc = Get-Service -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
+            if ($svc) {
+                Start-Service $svc.Name -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 3
+                $svc = Get-Service $svc.Name -ErrorAction SilentlyContinue
+                if ($svc.Status -eq "Running") {
+                    Write-Ok "Apache activo en puerto $global:PUERTO_ELEGIDO"
+                } else {
+                    Write-Err "Apache no arranco. Revisa C:\Apache24\logs\error.log"
+                }
+            }
+        } else {
+            Write-Err "No se encontro httpd.exe en $apacheRoot\bin"
+        }
     }
 }
 
-# =============== INSTALAR NGINX WINDOWS ===============
+# =============== INSTALAR NGINX ===============
 function Instalar-Nginx-Win {
     Write-Title "Instalando Nginx (Windows)..."
 
     Asegurar-Chocolatey
     Write-Info "Instalando Nginx $global:VERSION_ELEGIDA via Chocolatey..."
-    choco install nginx --version=$global:VERSION_ELEGIDA -y --no-progress 2>&1 | Out-Null
+    choco install nginx --version="$global:VERSION_ELEGIDA" --yes --no-progress --force 2>&1 | Out-Null
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Fallo la instalacion de Nginx. Codigo: $LASTEXITCODE"
+        return
+    }
+
     Refrescar-Path
     Write-Ok "Nginx instalado."
+
+    # Instalar NSSM para registrar Nginx como servicio real de Windows
+    if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
+        Write-Info "Instalando NSSM..."
+        choco install nssm --yes --no-progress 2>&1 | Out-Null
+        Refrescar-Path
+    }
 
     $nginxRoot = Obtener-Ruta-Nginx
     if (-not $nginxRoot) {
         Write-Err "No se encontro nginx.exe tras la instalacion."
         return
     }
-    Write-Info "Nginx en: $nginxRoot"
+    Write-Info "Nginx encontrado en: $nginxRoot"
 
+    # Configurar puerto en nginx.conf
     $nginxConf = "$nginxRoot\conf\nginx.conf"
     if (Test-Path $nginxConf) {
         $contenido = Get-Content $nginxConf -Raw
-        $contenido = $contenido -replace 'listen\s+80;', "listen $global:PUERTO_ELEGIDO;"
-        $contenido = $contenido -replace '(http\s*\{)', @"
-`$1
-    server_tokens off;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-"@
+        # Reemplazar puerto en bloque server { listen X; }
+        $contenido = $contenido -replace 'listen\s+\d+\s*;', "listen $global:PUERTO_ELEGIDO;"
+        # server_tokens off: oculta version en headers
+        if ($contenido -notmatch 'server_tokens') {
+            $contenido = $contenido -replace '(http\s*\{)', "`$1`n    server_tokens off;"
+        }
+        # Headers de seguridad dentro del bloque server
+        if ($contenido -notmatch 'X-Frame-Options') {
+            $contenido = $contenido -replace '(server\s*\{)', "`$1`n        add_header X-Frame-Options SAMEORIGIN always;`n        add_header X-Content-Type-Options nosniff always;"
+        }
         Set-Content $nginxConf $contenido -Encoding UTF8
-        Write-Ok "Puerto y seguridad configurados."
+        Write-Ok "Puerto y seguridad configurados en nginx.conf."
     } else {
-        Write-Err "No se encontro nginx.conf"
+        Write-Err "No se encontro nginx.conf en $nginxRoot\conf"
     }
 
+    # index.html personalizado
     $htmlDir = "$nginxRoot\html"
     New-Item -ItemType Directory -Force -Path $htmlDir | Out-Null
     Set-Content -Path "$htmlDir\index.html" -Encoding UTF8 -Force -Value @"
@@ -420,32 +485,33 @@ function Instalar-Nginx-Win {
 
     Abrir-Puerto-Firewall $global:PUERTO_ELEGIDO "Nginx"
 
-    # Registrar como servicio con NSSM
-    if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
-        Write-Info "Instalando NSSM..."
-        choco install nssm -y --no-progress 2>&1 | Out-Null
-        Refrescar-Path
+    # Registrar Nginx como servicio con NSSM (nombre incluye puerto para evitar conflictos)
+    $serviceName = "nginx-$global:PUERTO_ELEGIDO"
+    $nginxExe    = "$nginxRoot\nginx.exe"
+
+    # Eliminar servicio anterior si existe
+    $svcAnterior = Get-Service $serviceName -ErrorAction SilentlyContinue
+    if ($svcAnterior) {
+        Stop-Service $serviceName -Force -ErrorAction SilentlyContinue
+        & nssm remove $serviceName confirm 2>&1 | Out-Null
     }
 
-    $svcNginx = Get-Service nginx -ErrorAction SilentlyContinue
-    if ($svcNginx) {
-        Stop-Service nginx -Force -ErrorAction SilentlyContinue
-        & nssm remove nginx confirm 2>&1 | Out-Null
-    }
+    & nssm install $serviceName $nginxExe 2>&1 | Out-Null
+    & nssm set $serviceName AppDirectory $nginxRoot 2>&1 | Out-Null
+    & nssm set $serviceName DisplayName "Nginx HTTP Server (puerto $global:PUERTO_ELEGIDO)" 2>&1 | Out-Null
+    & nssm set $serviceName Start SERVICE_AUTO_START 2>&1 | Out-Null
+    & nssm set $serviceName AppStdout "$nginxRoot\logs\service.log" 2>&1 | Out-Null
+    & nssm set $serviceName AppStderr "$nginxRoot\logs\service-error.log" 2>&1 | Out-Null
 
-    $nginxExe = "$nginxRoot\nginx.exe"
-    & nssm install nginx $nginxExe 2>&1 | Out-Null
-    & nssm set nginx AppDirectory $nginxRoot 2>&1 | Out-Null
-    & nssm set nginx AppStdout "$nginxRoot\logs\service.log" 2>&1 | Out-Null
-    & nssm set nginx AppStderr "$nginxRoot\logs\service-error.log" 2>&1 | Out-Null
-    Set-Service nginx -StartupType Automatic -ErrorAction SilentlyContinue
-    Start-Service nginx -ErrorAction SilentlyContinue
+    Start-Service $serviceName -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 3
 
-    if ((Get-Service nginx -ErrorAction SilentlyContinue).Status -eq "Running") {
-        Write-Ok "Nginx activo en puerto $global:PUERTO_ELEGIDO"
+    $svc = Get-Service $serviceName -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -eq "Running") {
+        Write-Ok "Nginx activo en puerto $global:PUERTO_ELEGIDO (servicio: $serviceName)"
     } else {
         Write-Err "Nginx no arranco. Revisa $nginxRoot\logs\error.log"
+        Write-Info "O inicia manualmente: nssm start $serviceName"
     }
 }
 
@@ -470,23 +536,23 @@ function Instalar-HTTP {
     switch ($opcion) {
         "1" {
             $versiones = Obtener-Versiones-IIS
-            if (-not (Elegir-Version "IIS" $versiones)) { return }
+            if (-not (Elegir-Version-IIS $versiones)) { return }
             Pedir-Puerto
             Instalar-IIS
         }
         "2" {
             Write-Info "Consultando versiones de Apache..."
             $versiones = Obtener-Versiones-Choco "apache-httpd"
-            if ($versiones.Count -eq 0) { $versiones = @("2.4.55","2.4.63") }
-            if (-not (Elegir-Version "Apache2" $versiones)) { return }
+            if ($versiones.Count -eq 0) { $versiones = @("2.4.55","2.4.54","2.4.53") }
+            if (-not (Elegir-Version-Apache $versiones)) { return }
             Pedir-Puerto
             Instalar-Apache-Win
         }
         "3" {
             Write-Info "Consultando versiones de Nginx..."
             $versiones = Obtener-Versiones-Choco "nginx"
-            if ($versiones.Count -eq 0) { $versiones = @("1.26.2","1.29.5") }
-            if (-not (Elegir-Version "Nginx" $versiones)) { return }
+            if ($versiones.Count -eq 0) { $versiones = @("1.29.5","1.26.2") }
+            if (-not (Elegir-Version-Nginx $versiones)) { return }
             Pedir-Puerto
             Instalar-Nginx-Win
         }
@@ -520,11 +586,13 @@ function Verificar-HTTP {
     $apache = Get-Service -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
     if ($apache) {
-        $confDir = Obtener-Ruta-Apache
-        $puerto = if ($confDir) {
-            Get-Content "$confDir\httpd.conf" | Select-String '^Listen\s+(\d+)' `
-                | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
-        } else { "?" }
+        $puerto = "?"
+        if (Test-Path "C:\Apache24\conf\httpd.conf") {
+            $puerto = Get-Content "C:\Apache24\conf\httpd.conf" |
+                Select-String '^Listen\s+(\d+)' |
+                ForEach-Object { $_.Matches[0].Groups[1].Value } |
+                Select-Object -First 1
+        }
         if ($apache.Status -eq "Running") {
             Write-Host "Instalado y activo -- puerto: $puerto"
         } else {
@@ -533,15 +601,19 @@ function Verificar-HTTP {
     } else { Write-Host "No instalado" }
 
     Write-Host -NoNewline "  Nginx   : "
-    $nginx = Get-Service nginx -ErrorAction SilentlyContinue
+    $nginx = Get-Service -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^nginx" } | Select-Object -First 1
     if ($nginx) {
         $nginxRoot = Obtener-Ruta-Nginx
-        $puerto = if ($nginxRoot -and (Test-Path "$nginxRoot\conf\nginx.conf")) {
-            Get-Content "$nginxRoot\conf\nginx.conf" | Select-String 'listen\s+(\d+)' `
-                | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
-        } else { "?" }
+        $puerto = "?"
+        if ($nginxRoot -and (Test-Path "$nginxRoot\conf\nginx.conf")) {
+            $puerto = Get-Content "$nginxRoot\conf\nginx.conf" |
+                Select-String 'listen\s+(\d+)' |
+                ForEach-Object { $_.Matches[0].Groups[1].Value } |
+                Select-Object -First 1
+        }
         if ($nginx.Status -eq "Running") {
-            Write-Host "Instalado y activo -- puerto: $puerto"
+            Write-Host "Instalado y activo -- puerto: $puerto (servicio: $($nginx.Name))"
         } else {
             Write-Host "Instalado pero detenido -- puerto: $puerto"
         }
@@ -589,21 +661,25 @@ function Revisar-HTTP {
         } catch { Write-Err "No se pudo obtener index de puerto $puerto" }
     }
 
+    # Detectar puertos activos
     $puertoIIS = & "$env:SystemRoot\system32\inetsrv\appcmd.exe" list site "Default Web Site" 2>$null `
         | Select-String ':(\d+):' `
         | ForEach-Object { $_.Matches[0].Groups[1].Value } `
         | Select-Object -First 1
 
-    $confDir      = Obtener-Ruta-Apache
-    $puertoApache = if ($confDir) {
-        Get-Content "$confDir\httpd.conf" | Select-String '^Listen\s+(\d+)' `
-            | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
+    $puertoApache = if (Test-Path "C:\Apache24\conf\httpd.conf") {
+        Get-Content "C:\Apache24\conf\httpd.conf" |
+            Select-String '^Listen\s+(\d+)' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value } |
+            Select-Object -First 1
     } else { 80 }
 
     $nginxRoot   = Obtener-Ruta-Nginx
     $puertoNginx = if ($nginxRoot -and (Test-Path "$nginxRoot\conf\nginx.conf")) {
-        Get-Content "$nginxRoot\conf\nginx.conf" | Select-String 'listen\s+(\d+)' `
-            | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
+        Get-Content "$nginxRoot\conf\nginx.conf" |
+            Select-String 'listen\s+(\d+)' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value } |
+            Select-Object -First 1
     } else { 80 }
 
     switch ($opcion) {
