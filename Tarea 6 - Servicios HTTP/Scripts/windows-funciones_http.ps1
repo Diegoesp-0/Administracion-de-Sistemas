@@ -56,12 +56,24 @@ function Obtener-Ruta-Nginx {
 
 # =============== BUSCAR RUTA APACHE ===============
 function Obtener-Ruta-Apache {
-    $conf = Get-ChildItem "C:\tools","C:\Apache24","C:\Apache2" -Filter "httpd.conf" `
-        -Recurse -ErrorAction SilentlyContinue -Depth 5 | Select-Object -First 1
+    # Rutas conocidas donde choco instala apache-httpd
+    $rutas = @(
+        "$env:APPDATA\Apache24\conf",
+        "C:\Apache24\conf",
+        "C:\tools\Apache24\conf"
+    )
+    foreach ($r in $rutas) {
+        if (Test-Path "$r\httpd.conf") { return $r }
+    }
+
+    # Busqueda en AppData del usuario actual
+    $conf = Get-ChildItem $env:APPDATA -Filter "httpd.conf" `
+        -Recurse -ErrorAction SilentlyContinue -Depth 4 | Select-Object -First 1
     if ($conf) { return $conf.DirectoryName }
 
-    $conf = Get-ChildItem "C:\" -Filter "httpd.conf" -Recurse `
-        -ErrorAction SilentlyContinue -Depth 6 | Select-Object -First 1
+    # Busqueda en ProgramData
+    $conf = Get-ChildItem $env:ProgramData -Filter "httpd.conf" `
+        -Recurse -ErrorAction SilentlyContinue -Depth 6 | Select-Object -First 1
     if ($conf) { return $conf.DirectoryName }
 
     return $null
