@@ -1,0 +1,531 @@
+$global:VERSION_ELEGIDA = ""
+$global:PUERTO_ELEGIDO  = 80
+
+# =============== MENSAJES ===============
+function Write-Ok    { param($msg) Write-Host "[OK] $msg" }
+function Write-Info  { param($msg) Write-Host "[INFO] $msg" }
+function Write-Err   { param($msg) Write-Host "[ERROR] $msg" }
+function Write-Title { param($msg) Write-Host "`n==== $msg ====`n" }
+
+# =============== CHOCOLATEY ===============
+function Asegurar-Chocolatey {
+    if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+        Write-Info "Instalando Chocolatey..."
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = `
+            [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        Invoke-Expression ((New-Object System.Net.WebClient).DownloadString(
+            'https://community.chocolatey.org/install.ps1'))
+        $env:PATH += ";$env:ALLUSERSPROFILE\chocolatey\bin"
+        Write-Ok "Chocolatey instalado."
+    } else {
+        Write-Info "Chocolatey: ok."
+    }
+}
+
+# =============== OBTENER VERSIONES ===============
+function Obtener-Versiones-Choco {
+    param([string]$paquete)
+
+    Asegurar-Chocolatey
+
+    $versiones = choco list $paquete --all --exact --limit-output 2>$null `
+        | ForEach-Object { ($_ -split '\|')[1] } `
+        | Where-Object   { $_ -match '^\d+\.\d+' } `
+        | Sort-Object    { [version]($_ -replace '[^0-9.]', '') } `
+        | Select-Object  -Unique
+
+    return $versiones
+}
+
+function Obtener-Versiones-IIS {
+    $ver = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\InetStp" `
+        -ErrorAction SilentlyContinue).VersionString
+    if ($ver) { return @($ver) }
+    return @("10.0")
+}
+
+# =============== ELEGIR VERSION ===============
+function Elegir-Version {
+    param([string]$servidor, [string[]]$versiones)
+
+    Clear-Host
+
+    if ($versiones.Count -eq 0) {
+        Write-Err "No se encontraron versiones para '$servidor'."
+        return $false
+    }
+
+    Write-Host ""
+    Write-Host "=== Versiones disponibles: $servidor ==="
+    Write-Host ""
+
+    for ($i = 0; $i -lt $versiones.Count; $i++) {
+        $etiqueta = ""
+        if ($i -eq 0)                    { $etiqueta = "  [LTS / Estable]" }
+        if ($i -eq $versiones.Count - 1) { $etiqueta = "  [Latest / Desarrollo]" }
+        Write-Host "  [$($i+1)] $($versiones[$i])$etiqueta"
+    }
+    Write-Host ""
+
+    while ($true) {
+        $sel = Read-Host "Elige una version [1-$($versiones.Count)]"
+        $sel = $sel -replace '[^0-9]', ''
+        if ($sel -match '^\d+$' -and [int]$sel -ge 1 -and [int]$sel -le $versiones.Count) {
+            $global:VERSION_ELEGIDA = $versiones[[int]$sel - 1]
+            Write-Ok "Version elegida: $global:VERSION_ELEGIDA"
+            return $true
+        }
+        Write-Err "Opcion invalida."
+    }
+}
+
+# =============== VALIDAR PUERTO ===============
+function Validar-Puerto {
+    param([int]$puerto)
+
+    if ($puerto -lt 1 -or $puerto -gt 65535) {
+        Write-Err "El puerto debe estar entre 1 y 65535."
+        return $false
+    }
+
+    foreach ($r in $global:PUERTOS_RESERVADOS) {
+        if ($puerto -eq $r) {
+            Write-Err "Puerto $puerto reservado para otro servicio."
+            return $false
+        }
+    }
+
+    $conexion = Test-NetConnection -ComputerName localhost -Port $puerto `
+        -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+    if ($conexion.TcpTestSucceeded) {
+        Write-Err "El puerto $puerto ya esta en uso."
+        return $false
+    }
+
+    return $true
+}
+
+# =============== PEDIR PUERTO ===============
+function Pedir-Puerto {
+    Clear-Host
+    Write-Host ""
+    Write-Host "=== Configuracion de Puerto ==="
+    Write-Host ""
+    Write-Info "Puerto por defecto : 80"
+    Write-Info "Otros comunes      : 8080, 8888"
+    Write-Info "Bloqueados         : $($global:PUERTOS_RESERVADOS -join ', ')"
+    Write-Host ""
+
+    while ($true) {
+        $input = Read-Host "Ingresa el puerto [Enter = 80]"
+        if ([string]::IsNullOrWhiteSpace($input)) { $input = "80" }
+        $input = $input -replace '[^0-9]', ''
+
+        if ([string]::IsNullOrWhiteSpace($input)) {
+            Write-Err "Ingresa un numero."
+            continue
+        }
+
+        $puerto = [int]$input
+        if (Validar-Puerto $puerto) {
+            $global:PUERTO_ELEGIDO = $puerto
+            Write-Ok "Puerto $puerto aceptado."
+            Start-Sleep -Seconds 1
+            break
+        }
+    }
+}
+
+# =============== FIREWALL ===============
+function Abrir-Puerto-Firewall {
+    param([int]$puerto, [string]$nombre)
+
+    $existe = Get-NetFirewallRule -DisplayName "HTTP-$nombre-$puerto" -ErrorAction SilentlyContinue
+    if (-not $existe) {
+        New-NetFirewallRule -DisplayName "HTTP-$nombre-$puerto" `
+            -Direction Inbound -Protocol TCP -LocalPort $puerto `
+            -Action Allow -Profile Any | Out-Null
+        Write-Ok "Firewall: puerto $puerto abierto."
+    } else {
+        Write-Info "Firewall: regla para puerto $puerto ya existe."
+    }
+}
+
+# =============== INSTALAR IIS ===============
+function Instalar-IIS {
+    Write-Title "Instalando IIS..."
+
+    $features = @(
+        "Web-Server", "Web-Common-Http", "Web-Static-Content",
+        "Web-Default-Doc", "Web-Http-Errors", "Web-Security",
+        "Web-Filtering", "Web-Http-Logging", "Web-Stat-Compression"
+    )
+
+    foreach ($f in $features) {
+        Install-WindowsFeature -Name $f -ErrorAction SilentlyContinue | Out-Null
+    }
+    Write-Ok "IIS instalado."
+
+    # Cambiar puerto via appcmd (disponible en Core)
+    $appcmd = "$env:SystemRoot\system32\inetsrv\appcmd.exe"
+
+    & $appcmd set site "Default Web Site" /bindings:"http/*:$($global:PUERTO_ELEGIDO):" 2>&1 | Out-Null
+    Write-Ok "Puerto configurado -> $global:PUERTO_ELEGIDO"
+
+    # Ocultar version con urlscan / webconfig
+    $webConfig = "$global:IIS_WEBROOT\web.config"
+    $webConfigContent = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <system.webServer>
+    <security>
+      <requestFiltering removeServerHeader="true">
+        <verbs>
+          <add verb="TRACE" allowed="false" />
+          <add verb="DELETE" allowed="false" />
+        </verbs>
+      </requestFiltering>
+    </security>
+    <httpProtocol>
+      <customHeaders>
+        <remove name="X-Powered-By" />
+        <add name="X-Frame-Options" value="SAMEORIGIN" />
+        <add name="X-Content-Type-Options" value="nosniff" />
+      </customHeaders>
+    </httpProtocol>
+  </system.webServer>
+</configuration>
+"@
+    Set-Content -Path $webConfig -Value $webConfigContent -Encoding UTF8
+    Write-Ok "Seguridad configurada (web.config)."
+
+    # index.html
+    $html = @"
+<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><title>IIS</title></head>
+<body>
+<h1>Servidor: IIS</h1>
+<p>Version: $global:VERSION_ELEGIDA</p>
+<p>Puerto: $global:PUERTO_ELEGIDO</p>
+</body>
+</html>
+"@
+    Set-Content -Path "$global:IIS_WEBROOT\index.html" -Value $html -Encoding UTF8
+    Write-Ok "index.html creado."
+
+    # Permisos
+    $acl  = Get-Acl $global:IIS_WEBROOT
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        "IIS_IUSRS", "ReadAndExecute",
+        "ContainerInherit,ObjectInherit", "None", "Allow")
+    $acl.SetAccessRule($rule)
+    Set-Acl $global:IIS_WEBROOT $acl
+    Write-Ok "Permisos aplicados -> IIS_IUSRS (ReadAndExecute)."
+
+    Abrir-Puerto-Firewall $global:PUERTO_ELEGIDO "IIS"
+
+    Start-Service W3SVC -ErrorAction SilentlyContinue
+    Set-Service   W3SVC -StartupType Automatic
+    Start-Sleep -Seconds 2
+
+    if ((Get-Service W3SVC -ErrorAction SilentlyContinue).Status -eq "Running") {
+        Write-Ok "IIS activo en puerto $global:PUERTO_ELEGIDO"
+    } else {
+        Write-Err "IIS no arranco. Revisa el Visor de Eventos."
+    }
+}
+
+# =============== INSTALAR APACHE WINDOWS ===============
+function Instalar-Apache-Win {
+    Write-Title "Instalando Apache2 (Windows)..."
+
+    Asegurar-Chocolatey
+
+    Write-Info "Instalando Apache $global:VERSION_ELEGIDA via Chocolatey..."
+    choco install apache-httpd --version=$global:VERSION_ELEGIDA -y --force 2>&1 | Out-Null
+    Write-Ok "Apache instalado."
+
+    $httpdConf = "C:\Apache24\conf\httpd.conf"
+    if (Test-Path $httpdConf) {
+        $contenido = Get-Content $httpdConf -Raw
+        $contenido = $contenido -replace 'Listen 80', "Listen $global:PUERTO_ELEGIDO"
+        $contenido += @"
+
+ServerTokens Prod
+ServerSignature Off
+
+<IfModule mod_headers.c>
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-Content-Type-Options "nosniff"
+</IfModule>
+
+<LimitExcept GET POST HEAD OPTIONS>
+    Require all denied
+</LimitExcept>
+"@
+        Set-Content $httpdConf $contenido -Encoding UTF8
+        Write-Ok "Puerto y seguridad configurados."
+    }
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><title>Apache2</title></head>
+<body>
+<h1>Servidor: Apache2</h1>
+<p>Version: $global:VERSION_ELEGIDA</p>
+<p>Puerto: $global:PUERTO_ELEGIDO</p>
+</body>
+</html>
+"@
+    New-Item -ItemType Directory -Force -Path $global:APACHE_WEBROOT | Out-Null
+    Set-Content -Path "$global:APACHE_WEBROOT\index.html" -Value $html -Encoding UTF8
+    Write-Ok "index.html creado."
+
+    Abrir-Puerto-Firewall $global:PUERTO_ELEGIDO "Apache"
+
+    & "C:\Apache24\bin\httpd.exe" -k install 2>&1 | Out-Null
+    Start-Service Apache2.4 -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+
+    if ((Get-Service Apache2.4 -ErrorAction SilentlyContinue).Status -eq "Running") {
+        Write-Ok "Apache activo en puerto $global:PUERTO_ELEGIDO"
+    } else {
+        Write-Err "Apache no arranco. Revisa C:\Apache24\logs\error.log"
+    }
+}
+
+# =============== INSTALAR NGINX WINDOWS ===============
+function Instalar-Nginx-Win {
+    Write-Title "Instalando Nginx (Windows)..."
+
+    Asegurar-Chocolatey
+
+    Write-Info "Instalando Nginx $global:VERSION_ELEGIDA via Chocolatey..."
+    choco install nginx --version=$global:VERSION_ELEGIDA -y --force 2>&1 | Out-Null
+    Write-Ok "Nginx instalado."
+
+    $nginxConf = "C:\tools\nginx\conf\nginx.conf"
+    if (-not (Test-Path $nginxConf)) {
+        $nginxConf = "C:\nginx\conf\nginx.conf"
+    }
+
+    if (Test-Path $nginxConf) {
+        $contenido = Get-Content $nginxConf -Raw
+        $contenido = $contenido -replace 'listen\s+80;', "listen $global:PUERTO_ELEGIDO;"
+        $contenido = $contenido -replace '(http\s*\{)', @"
+`$1
+    server_tokens off;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+"@
+        Set-Content $nginxConf $contenido -Encoding UTF8
+        Write-Ok "Puerto y seguridad configurados."
+    }
+
+    $nginxRoot = Split-Path $nginxConf -Parent | Split-Path -Parent
+    $htmlDir   = "$nginxRoot\html"
+    New-Item -ItemType Directory -Force -Path $htmlDir | Out-Null
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><title>Nginx</title></head>
+<body>
+<h1>Servidor: Nginx</h1>
+<p>Version: $global:VERSION_ELEGIDA</p>
+<p>Puerto: $global:PUERTO_ELEGIDO</p>
+</body>
+</html>
+"@
+    Set-Content -Path "$htmlDir\index.html" -Value $html -Encoding UTF8
+    Write-Ok "index.html creado."
+
+    Abrir-Puerto-Firewall $global:PUERTO_ELEGIDO "Nginx"
+
+    # En Core se usa NSSM para registrar Nginx como servicio
+    $nssm = "$env:ALLUSERSPROFILE\chocolatey\bin\nssm.exe"
+    $nginxExe = "$nginxRoot\nginx.exe"
+
+    if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
+        choco install nssm -y 2>&1 | Out-Null
+    }
+
+    & nssm install nginx $nginxExe 2>&1 | Out-Null
+    & nssm set nginx AppDirectory $nginxRoot 2>&1 | Out-Null
+    Start-Service nginx -ErrorAction SilentlyContinue
+    Set-Service   nginx -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+
+    if ((Get-Service nginx -ErrorAction SilentlyContinue).Status -eq "Running") {
+        Write-Ok "Nginx activo en puerto $global:PUERTO_ELEGIDO"
+    } else {
+        Write-Err "Nginx no arranco. Revisa $nginxRoot\logs\error.log"
+    }
+}
+
+# =============== MENU INSTALACION ===============
+function Instalar-HTTP {
+    Clear-Host
+    Write-Host ""
+    Write-Host "=== Instalacion de Servidor HTTP ==="
+    Write-Host ""
+    Write-Host "  [1] IIS (Internet Information Services)"
+    Write-Host "  [2] Apache2"
+    Write-Host "  [3] Nginx"
+    Write-Host ""
+
+    while ($true) {
+        $opcion = Read-Host "Selecciona un servidor [1-3]"
+        $opcion = $opcion -replace '[^0-9]', ''
+        if ($opcion -match '^[123]$') { break }
+        Write-Err "Opcion invalida."
+    }
+
+    switch ($opcion) {
+        "1" {
+            $versiones = Obtener-Versiones-IIS
+            if (-not (Elegir-Version "IIS" $versiones)) { return }
+            Pedir-Puerto
+            Instalar-IIS
+        }
+        "2" {
+            Write-Info "Consultando versiones de Apache..."
+            $versiones = Obtener-Versiones-Choco "apache-httpd"
+            if ($versiones.Count -eq 0) { $versiones = @("2.4.62", "2.4.63") }
+            if (-not (Elegir-Version "Apache2" $versiones)) { return }
+            Pedir-Puerto
+            Instalar-Apache-Win
+        }
+        "3" {
+            Write-Info "Consultando versiones de Nginx..."
+            $versiones = Obtener-Versiones-Choco "nginx"
+            if ($versiones.Count -eq 0) { $versiones = @("1.26.2", "1.27.2") }
+            if (-not (Elegir-Version "Nginx" $versiones)) { return }
+            Pedir-Puerto
+            Instalar-Nginx-Win
+        }
+    }
+}
+
+# =============== VERIFICAR ESTADO ===============
+function Verificar-HTTP {
+    Clear-Host
+    Write-Host ""
+    Write-Host "=== Estado de Servidores HTTP ==="
+    Write-Host ""
+
+    # IIS
+    Write-Host -NoNewline "  IIS     : "
+    $iis = Get-Service W3SVC -ErrorAction SilentlyContinue
+    if ($iis) {
+        $ver    = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\InetStp" -ErrorAction SilentlyContinue).VersionString
+        $puerto = & "$env:SystemRoot\system32\inetsrv\appcmd.exe" list site "Default Web Site" 2>$null `
+            | Select-String ':(\d+):' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+        if ($iis.Status -eq "Running") {
+            Write-Host "Instalado y activo -- version: $ver -- puerto: $puerto"
+        } else {
+            Write-Host "Instalado pero detenido -- version: $ver"
+        }
+    } else {
+        Write-Host "No instalado"
+    }
+
+    # Apache
+    Write-Host -NoNewline "  Apache2 : "
+    $apache = Get-Service Apache2.4 -ErrorAction SilentlyContinue
+    if ($apache) {
+        if ($apache.Status -eq "Running") {
+            Write-Host "Instalado y activo"
+        } else {
+            Write-Host "Instalado pero detenido"
+        }
+    } else {
+        Write-Host "No instalado"
+    }
+
+    # Nginx
+    Write-Host -NoNewline "  Nginx   : "
+    $nginx = Get-Service nginx -ErrorAction SilentlyContinue
+    if ($nginx) {
+        if ($nginx.Status -eq "Running") {
+            Write-Host "Instalado y activo"
+        } else {
+            Write-Host "Instalado pero detenido"
+        }
+    } else {
+        Write-Host "No instalado"
+    }
+
+    Write-Host ""
+}
+
+# =============== REVISAR CURL ===============
+function Revisar-HTTP {
+    Clear-Host
+    Write-Host ""
+    Write-Host "=== Revision de Servidores HTTP ==="
+    Write-Host ""
+    Write-Host "  [1] IIS"
+    Write-Host "  [2] Apache2"
+    Write-Host "  [3] Nginx"
+    Write-Host "  [4] Todos"
+    Write-Host ""
+
+    while ($true) {
+        $opcion = Read-Host "Selecciona [1-4]"
+        $opcion = $opcion -replace '[^0-9]', ''
+        if ($opcion -match '^[1234]$') { break }
+        Write-Err "Opcion invalida."
+    }
+
+    function Curl-Servidor {
+        param([string]$nombre, [int]$puerto)
+        Write-Host ""
+        Write-Host "--- $nombre (puerto $puerto) ---"
+        Write-Host "Headers:"
+        try {
+            $resp = Invoke-WebRequest -Uri "http://localhost:$puerto" `
+                -Method Head -UseBasicParsing -ErrorAction Stop
+            $resp.Headers.GetEnumerator() | ForEach-Object {
+                Write-Host "$($_.Key): $($_.Value)"
+            }
+        } catch {
+            Write-Err "No se pudo conectar a puerto $puerto"
+        }
+        Write-Host "Index:"
+        try {
+            $resp = Invoke-WebRequest -Uri "http://localhost:$puerto" `
+                -UseBasicParsing -ErrorAction Stop
+            Write-Host $resp.Content
+        } catch {
+            Write-Err "No se pudo obtener index de puerto $puerto"
+        }
+    }
+
+    $puertoIIS = & "$env:SystemRoot\system32\inetsrv\appcmd.exe" list site "Default Web Site" 2>$null `
+        | Select-String ':(\d+):' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+
+    $puertoApache = netstat -ano | Select-String "LISTENING" `
+        | Where-Object { $_ -match "Apache" } `
+        | ForEach-Object { ($_ -match ':(\d+)') | Out-Null; $matches[1] } `
+        | Select-Object -First 1
+
+    $puertoNginx = netstat -ano | Select-String "LISTENING" `
+        | Where-Object { $_ -match "nginx" } `
+        | ForEach-Object { ($_ -match ':(\d+)') | Out-Null; $matches[1] } `
+        | Select-Object -First 1
+
+    switch ($opcion) {
+        "1" { Curl-Servidor "IIS"    ([int]$puertoIIS)    }
+        "2" { Curl-Servidor "Apache" ([int]$puertoApache) }
+        "3" { Curl-Servidor "Nginx"  ([int]$puertoNginx)  }
+        "4" {
+            Curl-Servidor "IIS"    ([int]$puertoIIS)
+            Curl-Servidor "Apache" ([int]$puertoApache)
+            Curl-Servidor "Nginx"  ([int]$puertoNginx)
+        }
+    }
+}
