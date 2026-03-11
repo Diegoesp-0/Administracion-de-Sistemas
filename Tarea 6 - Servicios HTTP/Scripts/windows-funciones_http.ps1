@@ -1,3 +1,8 @@
+# =============================================
+#  windows-funciones_http.ps1  --  Funciones
+#  Windows Server 2022 Core
+# =============================================
+
 $global:VERSION_ELEGIDA = ""
 $global:PUERTO_ELEGIDO  = 80
 
