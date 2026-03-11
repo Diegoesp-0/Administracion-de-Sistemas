@@ -36,17 +36,15 @@ function Refrescar-Path {
 
 # =============== BUSCAR RUTA NGINX ===============
 function Obtener-Ruta-Nginx {
-    # Busca en C:\tools primero (choco instala como nginx-VERSION)
+    # choco instala nginx como nginx-VERSION dentro de C:\tools
     $exe = Get-ChildItem "C:\tools" -Filter "nginx.exe" -Recurse `
         -ErrorAction SilentlyContinue -Depth 3 | Select-Object -First 1
     if ($exe) { return $exe.DirectoryName }
 
-    # Rutas alternativas fijas
     foreach ($r in @("C:\nginx","C:\ProgramData\chocolatey\lib\nginx\tools\nginx")) {
         if (Test-Path "$r\nginx.exe") { return $r }
     }
 
-    # Busqueda general
     $exe = Get-ChildItem "C:\" -Filter "nginx.exe" -Recurse `
         -ErrorAction SilentlyContinue -Depth 5 | Select-Object -First 1
     if ($exe) { return $exe.DirectoryName }
@@ -56,7 +54,7 @@ function Obtener-Ruta-Nginx {
 
 # =============== BUSCAR RUTA APACHE ===============
 function Obtener-Ruta-Apache {
-    # Rutas conocidas donde choco instala apache-httpd
+    # choco instala apache-httpd en AppData\Roaming\Apache24
     $rutas = @(
         "$env:APPDATA\Apache24\conf",
         "C:\Apache24\conf",
@@ -66,14 +64,16 @@ function Obtener-Ruta-Apache {
         if (Test-Path "$r\httpd.conf") { return $r }
     }
 
-    # Busqueda en AppData del usuario actual
     $conf = Get-ChildItem $env:APPDATA -Filter "httpd.conf" `
-        -Recurse -ErrorAction SilentlyContinue -Depth 4 | Select-Object -First 1
+        -Recurse -ErrorAction SilentlyContinue -Depth 4 |
+        Where-Object { $_.FullName -notmatch "\\original\\" } |
+        Select-Object -First 1
     if ($conf) { return $conf.DirectoryName }
 
-    # Busqueda en ProgramData
-    $conf = Get-ChildItem $env:ProgramData -Filter "httpd.conf" `
-        -Recurse -ErrorAction SilentlyContinue -Depth 6 | Select-Object -First 1
+    $conf = Get-ChildItem "C:\ProgramData" -Filter "httpd.conf" `
+        -Recurse -ErrorAction SilentlyContinue -Depth 6 |
+        Where-Object { $_.FullName -notmatch "\\original\\" } |
+        Select-Object -First 1
     if ($conf) { return $conf.DirectoryName }
 
     return $null
@@ -82,7 +82,6 @@ function Obtener-Ruta-Apache {
 # =============== OBTENER VERSIONES ===============
 function Obtener-Versiones-Choco {
     param([string]$paquete)
-
     Asegurar-Chocolatey
 
     $versiones = choco search $paquete --exact --all-versions --limit-output 2>$null `
@@ -104,7 +103,6 @@ function Obtener-Versiones-IIS {
 # =============== ELEGIR VERSION ===============
 function Elegir-Version {
     param([string]$servidor, [string[]]$versiones)
-
     Clear-Host
 
     if ($versiones.Count -eq 0) {
@@ -144,21 +142,18 @@ function Validar-Puerto {
         Write-Err "El puerto debe estar entre 1 y 65535."
         return $false
     }
-
     foreach ($r in $global:PUERTOS_RESERVADOS) {
         if ($puerto -eq $r) {
             Write-Err "Puerto $puerto reservado para otro servicio."
             return $false
         }
     }
-
     $cx = Test-NetConnection -ComputerName localhost -Port $puerto `
         -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
     if ($cx.TcpTestSucceeded) {
         Write-Err "El puerto $puerto ya esta en uso."
         return $false
     }
-
     return $true
 }
 
@@ -174,12 +169,11 @@ function Pedir-Puerto {
     Write-Host ""
 
     while ($true) {
-        $input = Read-Host "Ingresa el puerto [Enter = 80]"
-        if ([string]::IsNullOrWhiteSpace($input)) { $input = "80" }
-        $input = $input -replace '[^0-9]',''
-        if ([string]::IsNullOrWhiteSpace($input)) { Write-Err "Ingresa un numero."; continue }
-
-        $puerto = [int]$input
+        $inp = Read-Host "Ingresa el puerto [Enter = 80]"
+        if ([string]::IsNullOrWhiteSpace($inp)) { $inp = "80" }
+        $inp = $inp -replace '[^0-9]',''
+        if ([string]::IsNullOrWhiteSpace($inp)) { Write-Err "Ingresa un numero."; continue }
+        $puerto = [int]$inp
         if (Validar-Puerto $puerto) {
             $global:PUERTO_ELEGIDO = $puerto
             Write-Ok "Puerto $puerto aceptado."
@@ -298,12 +292,17 @@ function Instalar-Apache-Win {
     $apacheRoot = Split-Path $confDir -Parent
 
     # Detener Apache antes de modificar config
-    $svcPrev = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
-    if ($svcPrev) { Stop-Service $svcPrev.Name -Force -ErrorAction SilentlyContinue }
+    $svcApache = Get-Service -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
+    if ($svcApache) {
+        Stop-Service $svcApache.Name -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
 
+    # Reemplazar cualquier puerto Listen y agregar seguridad (sin duplicar)
     $contenido = Get-Content $httpdConf -Raw
     $contenido = $contenido -replace 'Listen \d+', "Listen $global:PUERTO_ELEGIDO"
-    $contenido = $contenido -replace '(?s)# TAREA6-SECURITY-START.*# TAREA6-SECURITY-END\r?\n', ''
+    $contenido = $contenido -replace '(?s)# TAREA6-SECURITY-START.*?# TAREA6-SECURITY-END\r?\n?', ''
     $contenido += @"
 
 # TAREA6-SECURITY-START
@@ -325,7 +324,7 @@ ServerSignature Off
 
     $htmlDir = "$apacheRoot\htdocs"
     New-Item -ItemType Directory -Force -Path $htmlDir | Out-Null
-    Set-Content -Path "$htmlDir\index.html" -Encoding UTF8 -Value @"
+    Set-Content -Path "$htmlDir\index.html" -Encoding UTF8 -Force -Value @"
 <!DOCTYPE html>
 <html lang="es">
 <head><meta charset="UTF-8"><title>Apache2</title></head>
@@ -341,26 +340,32 @@ ServerSignature Off
     Abrir-Puerto-Firewall $global:PUERTO_ELEGIDO "Apache"
 
     $httpdExe = "$apacheRoot\bin\httpd.exe"
-    if (Test-Path $httpdExe) {
+    if (-not (Test-Path $httpdExe)) {
+        Write-Err "No se encontro httpd.exe en $apacheRoot\bin"
+        return
+    }
+
+    # Registrar servicio solo si no existe
+    $svcApache = Get-Service -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
+    if (-not $svcApache) {
         & $httpdExe -k install 2>&1 | Out-Null
         Start-Sleep -Seconds 1
+        $svcApache = Get-Service -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
+    }
 
-        # El servicio puede llamarse Apache o Apache2.4 segun la version
-        $svcApache = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
-        if ($svcApache) {
-            Start-Service $svcApache.Name -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
-            $svcApache = Get-Service $svcApache.Name -ErrorAction SilentlyContinue
-            if ($svcApache.Status -eq "Running") {
-                Write-Ok "Apache activo en puerto $global:PUERTO_ELEGIDO (servicio: $($svcApache.Name))"
-            } else {
-                Write-Err "Apache no arranco. Revisa $apacheRoot\logs\error.log"
-            }
+    if ($svcApache) {
+        Start-Service $svcApache.Name -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+        $svcApache = Get-Service $svcApache.Name -ErrorAction SilentlyContinue
+        if ($svcApache.Status -eq "Running") {
+            Write-Ok "Apache activo en puerto $global:PUERTO_ELEGIDO"
         } else {
-            Write-Err "No se encontro servicio Apache. Revisa $apacheRoot\logs\error.log"
+            Write-Err "Apache no arranco. Revisa $apacheRoot\logs\error.log"
         }
     } else {
-        Write-Err "No se encontro httpd.exe en $apacheRoot\bin"
+        Write-Err "No se encontro servicio Apache tras instalar."
     }
 }
 
@@ -385,7 +390,6 @@ function Instalar-Nginx-Win {
     if (Test-Path $nginxConf) {
         $contenido = Get-Content $nginxConf -Raw
         $contenido = $contenido -replace 'listen\s+80;', "listen $global:PUERTO_ELEGIDO;"
-        # Insertar server_tokens y headers despues de "http {"
         $contenido = $contenido -replace '(http\s*\{)', @"
 `$1
     server_tokens off;
@@ -398,7 +402,6 @@ function Instalar-Nginx-Win {
         Write-Err "No se encontro nginx.conf"
     }
 
-    # Sobreescribir index.html por defecto
     $htmlDir = "$nginxRoot\html"
     New-Item -ItemType Directory -Force -Path $htmlDir | Out-Null
     Set-Content -Path "$htmlDir\index.html" -Encoding UTF8 -Force -Value @"
@@ -423,8 +426,8 @@ function Instalar-Nginx-Win {
         Refrescar-Path
     }
 
-    $svcExiste = Get-Service nginx -ErrorAction SilentlyContinue
-    if ($svcExiste) {
+    $svcNginx = Get-Service nginx -ErrorAction SilentlyContinue
+    if ($svcNginx) {
         Stop-Service nginx -Force -ErrorAction SilentlyContinue
         & nssm remove nginx confirm 2>&1 | Out-Null
     }
@@ -473,7 +476,7 @@ function Instalar-HTTP {
         "2" {
             Write-Info "Consultando versiones de Apache..."
             $versiones = Obtener-Versiones-Choco "apache-httpd"
-            if ($versiones.Count -eq 0) { $versiones = @("2.4.62","2.4.63") }
+            if ($versiones.Count -eq 0) { $versiones = @("2.4.55","2.4.63") }
             if (-not (Elegir-Version "Apache2" $versiones)) { return }
             Pedir-Puerto
             Instalar-Apache-Win
@@ -481,7 +484,7 @@ function Instalar-HTTP {
         "3" {
             Write-Info "Consultando versiones de Nginx..."
             $versiones = Obtener-Versiones-Choco "nginx"
-            if ($versiones.Count -eq 0) { $versiones = @("1.26.2","1.27.2") }
+            if ($versiones.Count -eq 0) { $versiones = @("1.26.2","1.29.5") }
             if (-not (Elegir-Version "Nginx" $versiones)) { return }
             Pedir-Puerto
             Instalar-Nginx-Win
@@ -513,7 +516,8 @@ function Verificar-HTTP {
     } else { Write-Host "No instalado" }
 
     Write-Host -NoNewline "  Apache2 : "
-    $apache = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
+    $apache = Get-Service -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
     if ($apache) {
         $confDir = Obtener-Ruta-Apache
         $puerto = if ($confDir) {
