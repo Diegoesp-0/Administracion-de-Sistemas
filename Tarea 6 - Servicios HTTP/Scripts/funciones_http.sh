@@ -1,8 +1,8 @@
 #!/bin/bash
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../../../Funciones/Linux/colores.sh"
-source "$SCRIPT_DIR/../../../Funciones/Linux/validaciones.
+FUNC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$FUNC_DIR/../../Funciones/Linux/colores.sh"
+source "$FUNC_DIR/../../Funciones/Linux/validaciones.sh"
 
 VERSION_ELEGIDA=""
 PUERTO_ELEGIDO=""
