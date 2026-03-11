@@ -29,44 +29,21 @@ function Refrescar-Path {
                 [System.Environment]::GetEnvironmentVariable("PATH","User")
 }
 
-# =============== DESCOMPRIMIR ZIP (sin Expand-Archive) ===============
-function Expandir-Zip {
-    param([string]$zipPath, [string]$destino)
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $destino)
-}
-
-# =============== DESCARGAR CON curl.exe (incluido en Windows Server 2022) ===============
-function Descargar-Archivo {
-    param([string]$url, [string]$destino)
-    Write-Info "Descargando: $url"
-    & curl.exe -L -s -o $destino $url
-    if ((Test-Path $destino) -and (Get-Item $destino).Length -gt 100000) {
-        return $true
-    }
-    if (Test-Path $destino) { Remove-Item $destino -Force }
-    return $false
-}
-
 # =============== BUSCAR RUTA NGINX ===============
 function Obtener-Ruta-Nginx {
-    $rutasFijas = @(
-        "C:\tools\nginx",
-        "C:\nginx",
-        "C:\ProgramData\chocolatey\lib\nginx\tools\nginx",
-        "C:\ProgramData\chocolatey\lib\nginx\tools"
-    )
-    foreach ($r in $rutasFijas) {
+    # Busca en C:\tools primero (choco instala como nginx-VERSION)
+    $exe = Get-ChildItem "C:\tools" -Filter "nginx.exe" -Recurse `
+        -ErrorAction SilentlyContinue -Depth 3 | Select-Object -First 1
+    if ($exe) { return $exe.DirectoryName }
+
+    # Rutas alternativas fijas
+    foreach ($r in @("C:\nginx","C:\ProgramData\chocolatey\lib\nginx\tools\nginx")) {
         if (Test-Path "$r\nginx.exe") { return $r }
     }
 
-    $exe = Get-ChildItem "C:\tools","C:\ProgramData\chocolatey\lib" `
-        -Filter "nginx.exe" -Recurse -ErrorAction SilentlyContinue -Depth 6 `
-        | Select-Object -First 1
-    if ($exe) { return $exe.DirectoryName }
-
+    # Busqueda general
     $exe = Get-ChildItem "C:\" -Filter "nginx.exe" -Recurse `
-        -ErrorAction SilentlyContinue -Depth 7 | Select-Object -First 1
+        -ErrorAction SilentlyContinue -Depth 5 | Select-Object -First 1
     if ($exe) { return $exe.DirectoryName }
 
     return $null
@@ -74,29 +51,32 @@ function Obtener-Ruta-Nginx {
 
 # =============== BUSCAR RUTA APACHE ===============
 function Obtener-Ruta-Apache {
-    $rutasFijas = @(
-        "C:\Apache24\conf",
-        "C:\tools\Apache24\conf",
-        "C:\Apache2\conf",
-        "C:\tools\Apache2\conf"
-    )
-    foreach ($r in $rutasFijas) {
-        if (Test-Path "$r\httpd.conf") { return $r }
-    }
-
-    $conf = Get-ChildItem "C:\tools","C:\Apache24","C:\Apache2" `
-        -Filter "httpd.conf" -Recurse -ErrorAction SilentlyContinue -Depth 6 `
-        | Select-Object -First 1
+    $conf = Get-ChildItem "C:\tools","C:\Apache24","C:\Apache2" -Filter "httpd.conf" `
+        -Recurse -ErrorAction SilentlyContinue -Depth 5 | Select-Object -First 1
     if ($conf) { return $conf.DirectoryName }
 
     $conf = Get-ChildItem "C:\" -Filter "httpd.conf" -Recurse `
-        -ErrorAction SilentlyContinue -Depth 8 | Select-Object -First 1
+        -ErrorAction SilentlyContinue -Depth 6 | Select-Object -First 1
     if ($conf) { return $conf.DirectoryName }
 
     return $null
 }
 
-# =============== VERSIONES DISPONIBLES ===============
+# =============== OBTENER VERSIONES ===============
+function Obtener-Versiones-Choco {
+    param([string]$paquete)
+
+    Asegurar-Chocolatey
+
+    $versiones = choco search $paquete --exact --all-versions --limit-output 2>$null `
+        | ForEach-Object { ($_ -split '\|')[1] } `
+        | Where-Object   { $_ -match '^\d+\.\d+' } `
+        | Sort-Object    { [version]($_ -replace '[^0-9.]','') } `
+        | Select-Object  -Unique
+
+    return $versiones
+}
+
 function Obtener-Versiones-IIS {
     $ver = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\InetStp" `
         -ErrorAction SilentlyContinue).VersionString
@@ -104,19 +84,10 @@ function Obtener-Versiones-IIS {
     return @("10.0")
 }
 
-function Obtener-Versiones-Apache {
-    # Versiones estables de Apache Lounge (VS17 = Visual C++ 2022)
-    return @("2.4.58","2.4.62","2.4.63")
-}
-
-function Obtener-Versiones-Nginx {
-    # Versiones estables de nginx.org/download
-    return @("1.24.0","1.26.2","1.27.4")
-}
-
 # =============== ELEGIR VERSION ===============
 function Elegir-Version {
     param([string]$servidor, [string[]]$versiones)
+
     Clear-Host
 
     if ($versiones.Count -eq 0) {
@@ -127,6 +98,7 @@ function Elegir-Version {
     Write-Host ""
     Write-Host "=== Versiones disponibles: $servidor ==="
     Write-Host ""
+
     for ($i = 0; $i -lt $versiones.Count; $i++) {
         $etiqueta = ""
         if ($i -eq 0)                    { $etiqueta = "  [LTS / Estable]" }
@@ -150,22 +122,26 @@ function Elegir-Version {
 # =============== VALIDAR PUERTO ===============
 function Validar-Puerto {
     param([int]$puerto)
+
     if ($puerto -lt 1 -or $puerto -gt 65535) {
         Write-Err "El puerto debe estar entre 1 y 65535."
         return $false
     }
+
     foreach ($r in $global:PUERTOS_RESERVADOS) {
         if ($puerto -eq $r) {
             Write-Err "Puerto $puerto reservado para otro servicio."
             return $false
         }
     }
+
     $cx = Test-NetConnection -ComputerName localhost -Port $puerto `
         -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
     if ($cx.TcpTestSucceeded) {
         Write-Err "El puerto $puerto ya esta en uso."
         return $false
     }
+
     return $true
 }
 
@@ -185,6 +161,7 @@ function Pedir-Puerto {
         if ([string]::IsNullOrWhiteSpace($input)) { $input = "80" }
         $input = $input -replace '[^0-9]',''
         if ([string]::IsNullOrWhiteSpace($input)) { Write-Err "Ingresa un numero."; continue }
+
         $puerto = [int]$input
         if (Validar-Puerto $puerto) {
             $global:PUERTO_ELEGIDO = $puerto
@@ -272,6 +249,7 @@ function Instalar-IIS {
     Write-Ok "Permisos aplicados -> IIS_IUSRS."
 
     Abrir-Puerto-Firewall $global:PUERTO_ELEGIDO "IIS"
+
     Start-Service W3SVC -ErrorAction SilentlyContinue
     Set-Service   W3SVC -StartupType Automatic
     Start-Sleep -Seconds 2
@@ -287,50 +265,22 @@ function Instalar-IIS {
 function Instalar-Apache-Win {
     Write-Title "Instalando Apache2 (Windows)..."
 
+    Asegurar-Chocolatey
+    Write-Info "Instalando Apache $global:VERSION_ELEGIDA via Chocolatey..."
+    choco install apache-httpd --version=$global:VERSION_ELEGIDA -y --no-progress 2>&1 | Out-Null
+    Refrescar-Path
+    Write-Ok "Apache instalado."
+
     $confDir = Obtener-Ruta-Apache
     if (-not $confDir) {
-        $ver = $global:VERSION_ELEGIDA
-        $zip = "C:\Temp\apache.zip"
-        New-Item -ItemType Directory -Force -Path "C:\Temp" | Out-Null
-
-        # Intentar descarga desde Apache Lounge
-        $url = "https://www.apachelounge.com/download/VS17/binaries/httpd-$ver-win64-VS17.zip"
-        $ok  = Descargar-Archivo $url $zip
-
-        if (-not $ok) {
-            Write-Err "No se pudo descargar Apache $ver automaticamente."
-            Write-Info "Opciones:"
-            Write-Info "  1. Coloca manualmente el ZIP en C:\Temp\apache.zip y ejecuta de nuevo."
-            Write-Info "  2. Descarga desde: https://www.apachelounge.com/download/"
-            return
-        }
-
-        Write-Info "Descomprimiendo Apache..."
-        try {
-            Expandir-Zip $zip "C:\"
-            Remove-Item $zip -ErrorAction SilentlyContinue
-            Write-Ok "Apache descomprimido."
-        } catch {
-            Write-Err "Error al descomprimir: $_"
-            return
-        }
-
-        $confDir = Obtener-Ruta-Apache
-        if (-not $confDir) {
-            Write-Err "No se encontro httpd.conf tras descomprimir."
-            return
-        }
-    } else {
-        Write-Info "Apache ya presente en: $confDir"
+        Write-Err "No se encontro httpd.conf tras la instalacion."
+        return
     }
 
     $httpdConf  = "$confDir\httpd.conf"
     $apacheRoot = Split-Path $confDir -Parent
 
-    # Corregir ServerRoot y puerto
     $contenido = Get-Content $httpdConf -Raw
-    $apacheRootFwd = $apacheRoot -replace '\\','/'
-    $contenido = $contenido -replace 'Define SRVROOT "[^"]*"', "Define SRVROOT `"$apacheRootFwd`""
     $contenido = $contenido -replace 'Listen 80', "Listen $global:PUERTO_ELEGIDO"
     $contenido += @"
 
@@ -363,6 +313,7 @@ ServerSignature Off
 </html>
 "@
     Write-Ok "index.html creado."
+
     Abrir-Puerto-Firewall $global:PUERTO_ELEGIDO "Apache"
 
     $httpdExe = "$apacheRoot\bin\httpd.exe"
@@ -384,54 +335,24 @@ ServerSignature Off
 function Instalar-Nginx-Win {
     Write-Title "Instalando Nginx (Windows)..."
 
+    Asegurar-Chocolatey
+    Write-Info "Instalando Nginx $global:VERSION_ELEGIDA via Chocolatey..."
+    choco install nginx --version=$global:VERSION_ELEGIDA -y --no-progress 2>&1 | Out-Null
+    Refrescar-Path
+    Write-Ok "Nginx instalado."
+
     $nginxRoot = Obtener-Ruta-Nginx
     if (-not $nginxRoot) {
-        $ver = $global:VERSION_ELEGIDA
-        $zip = "C:\Temp\nginx.zip"
-        New-Item -ItemType Directory -Force -Path "C:\Temp"  | Out-Null
-        New-Item -ItemType Directory -Force -Path "C:\tools" | Out-Null
-
-        $url = "https://nginx.org/download/nginx-$ver.zip"
-        $ok  = Descargar-Archivo $url $zip
-
-        if (-not $ok) {
-            Write-Err "No se pudo descargar Nginx $ver automaticamente."
-            Write-Info "Coloca manualmente el ZIP en C:\Temp\nginx.zip y ejecuta de nuevo."
-            Write-Info "Descarga desde: https://nginx.org/download/"
-            return
-        }
-
-        Write-Info "Descomprimiendo Nginx..."
-        try {
-            Expandir-Zip $zip "C:\tools"
-            Remove-Item $zip -ErrorAction SilentlyContinue
-            # El ZIP crea nginx-VERSION\ — renombrar a nginx para ruta fija
-            $carpeta = Get-ChildItem "C:\tools" -Filter "nginx-*" -Directory -ErrorAction SilentlyContinue `
-                | Select-Object -First 1
-            if ($carpeta) {
-                Rename-Item $carpeta.FullName "nginx" -ErrorAction SilentlyContinue
-            }
-            Write-Ok "Nginx descomprimido."
-        } catch {
-            Write-Err "Error al descomprimir: $_"
-            return
-        }
-
-        $nginxRoot = Obtener-Ruta-Nginx
-        if (-not $nginxRoot) {
-            Write-Err "No se encontro nginx.exe tras descomprimir."
-            return
-        }
-    } else {
-        Write-Info "Nginx ya presente en: $nginxRoot"
+        Write-Err "No se encontro nginx.exe tras la instalacion."
+        return
     }
-
     Write-Info "Nginx en: $nginxRoot"
 
     $nginxConf = "$nginxRoot\conf\nginx.conf"
     if (Test-Path $nginxConf) {
         $contenido = Get-Content $nginxConf -Raw
         $contenido = $contenido -replace 'listen\s+80;', "listen $global:PUERTO_ELEGIDO;"
+        # Insertar server_tokens y headers despues de "http {"
         $contenido = $contenido -replace '(http\s*\{)', @"
 `$1
     server_tokens off;
@@ -441,9 +362,10 @@ function Instalar-Nginx-Win {
         Set-Content $nginxConf $contenido -Encoding UTF8
         Write-Ok "Puerto y seguridad configurados."
     } else {
-        Write-Err "No se encontro nginx.conf en $nginxRoot\conf"
+        Write-Err "No se encontro nginx.conf"
     }
 
+    # Sobreescribir index.html por defecto
     $htmlDir = "$nginxRoot\html"
     New-Item -ItemType Directory -Force -Path $htmlDir | Out-Null
     Set-Content -Path "$htmlDir\index.html" -Encoding UTF8 -Force -Value @"
@@ -458,12 +380,12 @@ function Instalar-Nginx-Win {
 </html>
 "@
     Write-Ok "index.html creado."
+
     Abrir-Puerto-Firewall $global:PUERTO_ELEGIDO "Nginx"
 
     # Registrar como servicio con NSSM
     if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
         Write-Info "Instalando NSSM..."
-        Asegurar-Chocolatey
         choco install nssm -y --no-progress 2>&1 | Out-Null
         Refrescar-Path
     }
@@ -516,13 +438,17 @@ function Instalar-HTTP {
             Instalar-IIS
         }
         "2" {
-            $versiones = Obtener-Versiones-Apache
+            Write-Info "Consultando versiones de Apache..."
+            $versiones = Obtener-Versiones-Choco "apache-httpd"
+            if ($versiones.Count -eq 0) { $versiones = @("2.4.62","2.4.63") }
             if (-not (Elegir-Version "Apache2" $versiones)) { return }
             Pedir-Puerto
             Instalar-Apache-Win
         }
         "3" {
-            $versiones = Obtener-Versiones-Nginx
+            Write-Info "Consultando versiones de Nginx..."
+            $versiones = Obtener-Versiones-Choco "nginx"
+            if ($versiones.Count -eq 0) { $versiones = @("1.26.2","1.27.2") }
             if (-not (Elegir-Version "Nginx" $versiones)) { return }
             Pedir-Puerto
             Instalar-Nginx-Win
