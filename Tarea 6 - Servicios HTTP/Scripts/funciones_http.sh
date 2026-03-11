@@ -7,6 +7,29 @@ source "$FUNC_DIR/../../Funciones/Linux/validaciones.sh"
 VERSION_ELEGIDA=""
 PUERTO_ELEGIDO=""
 
+# =============== HABILITAR PUERTO EN SELINUX ===============
+habilitar_puerto_selinux() {
+    local puerto="$1"
+    local tipo="http_port_t"
+
+    if ! command -v semanage &>/dev/null; then
+        return 0
+    fi
+
+    if semanage port -l 2>/dev/null | grep "$tipo" | grep -qw "$puerto"; then
+        print_info "Puerto $puerto ya permitido en SELinux."
+        return 0
+    fi
+
+    if semanage port -a -t "$tipo" -p tcp "$puerto" 2>/dev/null; then
+        print_completado "Puerto $puerto habilitado en SELinux."
+    elif semanage port -m -t "$tipo" -p tcp "$puerto" 2>/dev/null; then
+        print_completado "Puerto $puerto modificado en SELinux."
+    else
+        print_info "No se pudo configurar SELinux para puerto $puerto (puede ser normal)."
+    fi
+}
+
 # =============== OBTENER VERSIONES ===============
 obtener_versiones_zypper() {
     local paquete="$1"
@@ -192,6 +215,8 @@ EOF
         print_completado "Firewall: puerto $PUERTO_ELEGIDO abierto."
     fi
 
+    habilitar_puerto_selinux "$PUERTO_ELEGIDO"
+
     systemctl enable apache2 &>/dev/null
     systemctl restart apache2 &>/dev/null
     sleep 2
@@ -313,6 +338,8 @@ EOF
         firewall-cmd --reload &>/dev/null
         print_completado "Firewall: puerto $PUERTO_ELEGIDO abierto."
     fi
+
+    habilitar_puerto_selinux "$PUERTO_ELEGIDO"
 
     systemctl enable nginx &>/dev/null
     systemctl restart nginx &>/dev/null
