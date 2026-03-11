@@ -1,8 +1,3 @@
-# =============================================
-#  windows-funciones_http.ps1  --  Funciones
-#  Windows Server 2022 Core
-# =============================================
-
 $global:VERSION_ELEGIDA = ""
 $global:PUERTO_ELEGIDO  = 80
 
@@ -36,34 +31,94 @@ function Refrescar-Path {
 
 # =============== BUSCAR RUTA NGINX ===============
 function Obtener-Ruta-Nginx {
-    # Busca en C:\tools primero (choco instala como nginx-VERSION)
-    $exe = Get-ChildItem "C:\tools" -Filter "nginx.exe" -Recurse `
-        -ErrorAction SilentlyContinue -Depth 3 | Select-Object -First 1
-    if ($exe) { return $exe.DirectoryName }
+    # 1. Rutas fijas conocidas de Chocolatey (ordenadas por probabilidad)
+    $rutasFijas = @(
+        "C:\tools\nginx",
+        "C:\nginx",
+        "C:\ProgramData\chocolatey\lib\nginx\tools\nginx",
+        "C:\ProgramData\chocolatey\lib\nginx\tools"
+    )
 
-    # Rutas alternativas fijas
-    foreach ($r in @("C:\nginx","C:\ProgramData\chocolatey\lib\nginx\tools\nginx")) {
-        if (Test-Path "$r\nginx.exe") { return $r }
+    foreach ($r in $rutasFijas) {
+        if (Test-Path "$r\nginx.exe") {
+            Write-Info "Nginx encontrado en ruta fija: $r"
+            return $r
+        }
     }
 
-    # Busqueda general
-    $exe = Get-ChildItem "C:\" -Filter "nginx.exe" -Recurse `
+    # 2. Buscar en C:\tools con mayor profundidad (choco puede crear nginx-VERSION)
+    $exe = Get-ChildItem "C:\tools" -Filter "nginx.exe" -Recurse `
         -ErrorAction SilentlyContinue -Depth 5 | Select-Object -First 1
-    if ($exe) { return $exe.DirectoryName }
+    if ($exe) {
+        Write-Info "Nginx encontrado en C:\tools: $($exe.DirectoryName)"
+        return $exe.DirectoryName
+    }
 
+    # 3. Buscar en lib de chocolatey con mayor profundidad
+    $exe = Get-ChildItem "C:\ProgramData\chocolatey\lib" -Filter "nginx.exe" -Recurse `
+        -ErrorAction SilentlyContinue -Depth 6 | Select-Object -First 1
+    if ($exe) {
+        Write-Info "Nginx encontrado en choco lib: $($exe.DirectoryName)"
+        return $exe.DirectoryName
+    }
+
+    # 4. Busqueda general en todo C:\ como ultimo recurso
+    Write-Info "Buscando nginx.exe en C:\... (puede tardar)"
+    $exe = Get-ChildItem "C:\" -Filter "nginx.exe" -Recurse `
+        -ErrorAction SilentlyContinue -Depth 7 | Select-Object -First 1
+    if ($exe) {
+        Write-Info "Nginx encontrado en: $($exe.DirectoryName)"
+        return $exe.DirectoryName
+    }
+
+    Write-Err "nginx.exe no encontrado en ninguna ruta conocida."
     return $null
 }
 
 # =============== BUSCAR RUTA APACHE ===============
 function Obtener-Ruta-Apache {
-    $conf = Get-ChildItem "C:\tools","C:\Apache24","C:\Apache2" -Filter "httpd.conf" `
-        -Recurse -ErrorAction SilentlyContinue -Depth 5 | Select-Object -First 1
-    if ($conf) { return $conf.DirectoryName }
+    # 1. Rutas fijas conocidas de Chocolatey
+    $rutasFijas = @(
+        "C:\tools\Apache24\conf",
+        "C:\Apache24\conf",
+        "C:\Apache2\conf",
+        "C:\tools\Apache2\conf",
+        "C:\ProgramData\chocolatey\lib\apache-httpd\tools\Apache24\conf"
+    )
 
-    $conf = Get-ChildItem "C:\" -Filter "httpd.conf" -Recurse `
+    foreach ($r in $rutasFijas) {
+        if (Test-Path "$r\httpd.conf") {
+            Write-Info "Apache encontrado en ruta fija: $r"
+            return $r
+        }
+    }
+
+    # 2. Buscar en C:\tools con mayor profundidad
+    $conf = Get-ChildItem "C:\tools" -Filter "httpd.conf" -Recurse `
         -ErrorAction SilentlyContinue -Depth 6 | Select-Object -First 1
-    if ($conf) { return $conf.DirectoryName }
+    if ($conf) {
+        Write-Info "Apache encontrado en C:\tools: $($conf.DirectoryName)"
+        return $conf.DirectoryName
+    }
 
+    # 3. Buscar en lib de chocolatey
+    $conf = Get-ChildItem "C:\ProgramData\chocolatey\lib" -Filter "httpd.conf" -Recurse `
+        -ErrorAction SilentlyContinue -Depth 7 | Select-Object -First 1
+    if ($conf) {
+        Write-Info "Apache encontrado en choco lib: $($conf.DirectoryName)"
+        return $conf.DirectoryName
+    }
+
+    # 4. Busqueda general en todo C:\ como ultimo recurso
+    Write-Info "Buscando httpd.conf en C:\... (puede tardar)"
+    $conf = Get-ChildItem "C:\" -Filter "httpd.conf" -Recurse `
+        -ErrorAction SilentlyContinue -Depth 8 | Select-Object -First 1
+    if ($conf) {
+        Write-Info "Apache encontrado en: $($conf.DirectoryName)"
+        return $conf.DirectoryName
+    }
+
+    Write-Err "httpd.conf no encontrado en ninguna ruta conocida."
     return $null
 }
 
@@ -274,11 +329,15 @@ function Instalar-Apache-Win {
     Write-Info "Instalando Apache $global:VERSION_ELEGIDA via Chocolatey..."
     choco install apache-httpd --version=$global:VERSION_ELEGIDA -y --no-progress 2>&1 | Out-Null
     Refrescar-Path
+
+    # Esperar un momento para que el sistema de archivos registre los nuevos archivos
+    Start-Sleep -Seconds 3
     Write-Ok "Apache instalado."
 
     $confDir = Obtener-Ruta-Apache
     if (-not $confDir) {
         Write-Err "No se encontro httpd.conf tras la instalacion."
+        Write-Info "Intenta localizar manualmente con: Get-ChildItem C:\ -Filter httpd.conf -Recurse -Depth 8"
         return
     }
 
@@ -344,11 +403,15 @@ function Instalar-Nginx-Win {
     Write-Info "Instalando Nginx $global:VERSION_ELEGIDA via Chocolatey..."
     choco install nginx --version=$global:VERSION_ELEGIDA -y --no-progress 2>&1 | Out-Null
     Refrescar-Path
+
+    # Esperar un momento para que el sistema de archivos registre los nuevos archivos
+    Start-Sleep -Seconds 3
     Write-Ok "Nginx instalado."
 
     $nginxRoot = Obtener-Ruta-Nginx
     if (-not $nginxRoot) {
         Write-Err "No se encontro nginx.exe tras la instalacion."
+        Write-Info "Intenta localizar manualmente con: Get-ChildItem C:\ -Filter nginx.exe -Recurse -Depth 7"
         return
     }
     Write-Info "Nginx en: $nginxRoot"
@@ -367,7 +430,7 @@ function Instalar-Nginx-Win {
         Set-Content $nginxConf $contenido -Encoding UTF8
         Write-Ok "Puerto y seguridad configurados."
     } else {
-        Write-Err "No se encontro nginx.conf"
+        Write-Err "No se encontro nginx.conf en $nginxRoot\conf"
     }
 
     # Sobreescribir index.html por defecto
