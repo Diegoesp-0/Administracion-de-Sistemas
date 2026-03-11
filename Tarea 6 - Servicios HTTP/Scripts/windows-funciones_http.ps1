@@ -336,12 +336,21 @@ ServerSignature Off
     $httpdExe = "$apacheRoot\bin\httpd.exe"
     if (Test-Path $httpdExe) {
         & $httpdExe -k install 2>&1 | Out-Null
-        Start-Service Apache2.4 -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-        if ((Get-Service Apache2.4 -ErrorAction SilentlyContinue).Status -eq "Running") {
-            Write-Ok "Apache activo en puerto $global:PUERTO_ELEGIDO"
+        Start-Sleep -Seconds 1
+
+        # El servicio puede llamarse Apache o Apache2.4 segun la version
+        $svcApache = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
+        if ($svcApache) {
+            Start-Service $svcApache.Name -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            $svcApache = Get-Service $svcApache.Name -ErrorAction SilentlyContinue
+            if ($svcApache.Status -eq "Running") {
+                Write-Ok "Apache activo en puerto $global:PUERTO_ELEGIDO (servicio: $($svcApache.Name))"
+            } else {
+                Write-Err "Apache no arranco. Revisa $apacheRoot\logs\error.log"
+            }
         } else {
-            Write-Err "Apache no arranco. Revisa $apacheRoot\logs\error.log"
+            Write-Err "No se encontro servicio Apache. Revisa $apacheRoot\logs\error.log"
         }
     } else {
         Write-Err "No se encontro httpd.exe en $apacheRoot\bin"
@@ -497,7 +506,7 @@ function Verificar-HTTP {
     } else { Write-Host "No instalado" }
 
     Write-Host -NoNewline "  Apache2 : "
-    $apache = Get-Service Apache2.4 -ErrorAction SilentlyContinue
+    $apache = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
     if ($apache) {
         $confDir = Obtener-Ruta-Apache
         $puerto = if ($confDir) {
