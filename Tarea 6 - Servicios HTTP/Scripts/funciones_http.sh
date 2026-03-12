@@ -35,29 +35,26 @@ obtener_versiones_zypper() {
     local paquete="$1"
     local versiones=()
 
-    # Metodo 1: rpm -q (instantaneo, si ya esta instalado)
-    local ver_instalada
-    ver_instalada=$(rpm -q "$paquete" --queryformat '%{VERSION}' 2>/dev/null)
-    if [[ -n "$ver_instalada" ]]; then
-        versiones+=("$ver_instalada")
+    # Metodo 1: rpm -q solo si ya esta instalado (evita el mensaje de error)
+    if rpm -q "$paquete" &>/dev/null; then
+        local ver_instalada
+        ver_instalada=$(rpm -q "$paquete" --queryformat '%{VERSION}' 2>/dev/null)
+        [[ -n "$ver_instalada" ]] && versiones+=("$ver_instalada")
     fi
 
-    # Metodo 2: zypper info (rapido, no hace search completo)
+    # Metodo 2: zypper info (consulta repo sin hacer search completo)
     local ver_repo
-    ver_repo=$(timeout 8 zypper --quiet --no-refresh info "$paquete" 2>/dev/null         | grep -i "^Version"         | awk '{print $NF}'         | grep -oP '^[0-9]+\.[0-9]+[^ ]*'         | head -1)
+    ver_repo=$(timeout 15 zypper --quiet info "$paquete" 2>/dev/null \
+        | grep -i "^Version" \
+        | awk '{print $NF}' \
+        | grep -oE '^[0-9]+\.[0-9]+[^ ]*' \
+        | head -1)
 
-    if [[ -n "$ver_repo" ]] && [[ "$ver_repo" != "$ver_instalada" ]]; then
+    if [[ -n "$ver_repo" && "$ver_repo" != "${versiones[0]:-}" ]]; then
         versiones+=("$ver_repo")
     fi
 
-    # Si no se obtuvo nada con zypper info, intentar search con timeout corto
-    if [[ ${#versiones[@]} -eq 0 ]]; then
-        mapfile -t versiones < <(
-            timeout 8 zypper --quiet --no-refresh se --match-exact --details "$paquete"                 -r openSUSE:repo-oss 2>/dev/null             | awk -F'|' 'NF>=4 && $4~/[0-9]/ {gsub(/ /,"",$4); print $4}'             | grep -v "^$"             | sort -uV
-        )
-    fi
-
-    # Fallback hardcoded si todo falla
+    # Fallback si todo falla
     if [[ ${#versiones[@]} -eq 0 ]]; then
         case "$paquete" in
             apache2) versiones=("2.4.63") ;;
@@ -66,8 +63,7 @@ obtener_versiones_zypper() {
         print_info "Usando version de referencia: ${versiones[*]}" >&2
     fi
 
-    printf '%s
-' "${versiones[@]}" | sort -uV
+    printf '%s\n' "${versiones[@]}"
 }
 
 obtener_versiones_tomcat() {
@@ -75,22 +71,26 @@ obtener_versiones_tomcat() {
 
     print_info "Consultando versiones de Tomcat..." >&2
 
-    # Una sola peticion: obtener todas las ramas disponibles
     local ramas
-    ramas=$(timeout 8 curl -s "$base_url" 2>/dev/null         | grep -oP 'tomcat-\K[0-9]+(?=/)'         | sort -uV)
+    ramas=$(timeout 8 curl -s "$base_url" 2>/dev/null \
+        | grep -oE 'tomcat-[0-9]+/' \
+        | grep -oE '[0-9]+' \
+        | sort -uV)
 
     if [[ -z "$ramas" ]]; then
-        print_info "Sin acceso. Usando versiones de referencia." >&2
+        print_info "Sin acceso a internet. Usando versiones de referencia." >&2
         echo "9.0.102"
         echo "10.1.40"
         echo "11.0.7"
         return
     fi
 
-    # Una peticion por rama en paralelo con timeout corto
     while IFS= read -r rama; do
         local latest
-        latest=$(timeout 5 curl -s "${base_url}tomcat-${rama}/" 2>/dev/null             | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+'             | sort -V | tail -1)
+        latest=$(timeout 5 curl -s "${base_url}tomcat-${rama}/" 2>/dev/null \
+            | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+/' \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
+            | sort -V | tail -1)
         [[ -n "$latest" ]] && echo "$latest"
     done <<< "$ramas"
 }
@@ -105,7 +105,6 @@ elegir_version() {
     if [[ ${#versiones[@]} -eq 0 ]]; then
         print_error "No se encontraron versiones para '$paquete'."
         print_info  "Verifica los repositorios: zypper repos"
-        print_info  "Actualiza si es necesario:  zypper refresh"
         return 1
     fi
 
@@ -180,6 +179,11 @@ instalar_apache() {
         return 1
     fi
     print_completado "Apache2 instalado."
+
+    # Leer version real ahora que ya esta instalado
+    local ver_real
+    ver_real=$(rpm -q apache2 --queryformat '%{VERSION}' 2>/dev/null)
+    [[ -n "$ver_real" ]] && VERSION_ELEGIDA="$ver_real"
 
     local listen_conf="/etc/apache2/listen.conf"
     cp "$listen_conf" "${listen_conf}.bak" 2>/dev/null
@@ -270,6 +274,11 @@ instalar_nginx() {
         return 1
     fi
     print_completado "Nginx instalado."
+
+    # Leer version real ahora que ya esta instalado
+    local ver_real
+    ver_real=$(rpm -q nginx --queryformat '%{VERSION}' 2>/dev/null)
+    [[ -n "$ver_real" ]] && VERSION_ELEGIDA="$ver_real"
 
     if ! id "www-nginx" &>/dev/null; then
         useradd -r -s /sbin/nologin -d "$NGINX_WEBROOT" -M www-nginx
@@ -396,9 +405,11 @@ instalar_tomcat() {
     if ! command -v java &>/dev/null; then
         print_info "Java no encontrado. Instalando OpenJDK 21..."
         print_info "Esto puede tardar varios minutos, por favor espera..."
-        zypper --non-interactive -y install java-21-openjdk java-21-openjdk-headless 2>&1             | grep -E "Installing|Downloading|Error|error|WARNING"
+        zypper --non-interactive install java-21-openjdk java-21-openjdk-headless 2>&1 \
+            | grep -E "^Instalando|^Installing|^Descargando|^Downloading|[Ee]rror"
         if ! command -v java &>/dev/null; then
             print_error "No se pudo instalar Java."
+            print_info  "Intenta manualmente: zypper install java-21-openjdk"
             return 1
         fi
         print_completado "Java instalado: $(java -version 2>&1 | head -1)"
@@ -557,10 +568,6 @@ instalar_HTTP() {
         1)
             print_info "Consultando versiones de Apache2..."
             mapfile -t versiones < <(obtener_versiones_zypper "apache2")
-            if [[ ${#versiones[@]} -eq 0 ]]; then
-                print_info "Usando versiones de referencia..."
-                versiones=("2.4.58" "2.4.59" "2.4.62")
-            fi
             elegir_version "Apache2" "${versiones[@]}" || return 1
             pedir_puerto
             instalar_apache
@@ -568,10 +575,6 @@ instalar_HTTP() {
         2)
             print_info "Consultando versiones de Nginx..."
             mapfile -t versiones < <(obtener_versiones_zypper "nginx")
-            if [[ ${#versiones[@]} -eq 0 ]]; then
-                print_info "Usando versiones de referencia..."
-                versiones=("1.21.5" "1.24.0" "1.25.3")
-            fi
             elegir_version "Nginx" "${versiones[@]}" || return 1
             pedir_puerto
             instalar_nginx
@@ -595,13 +598,13 @@ verificar_HTTP() {
     echo -en "  ${amarillo}Apache2  :${nc} "
     if rpm -q apache2 &>/dev/null; then
         local ver_apache
-        ver_apache=$(rpm -q apache2 --queryformat '%{VERSION}')
+        ver_apache=$(rpm -q apache2 --queryformat '%{VERSION}' 2>/dev/null)
         if systemctl is-active --quiet apache2; then
             local puerto_apache
             puerto_apache=$(ss -tulnp | grep -E 'httpd|apache2' | grep -oP ':\K[0-9]+' | head -1)
-            echo -e "${verde}Instalado y activo${nc} — version: $ver_apache — puerto: ${puerto_apache:-?}"
+            echo -e "${verde}Instalado y activo${nc} -- version: $ver_apache -- puerto: ${puerto_apache:-?}"
         else
-            echo -e "${amarillo}Instalado pero detenido${nc} — version: $ver_apache"
+            echo -e "${amarillo}Instalado pero detenido${nc} -- version: $ver_apache"
         fi
     else
         echo -e "${rojo}No instalado${nc}"
@@ -610,13 +613,13 @@ verificar_HTTP() {
     echo -en "  ${amarillo}Nginx    :${nc} "
     if rpm -q nginx &>/dev/null; then
         local ver_nginx
-        ver_nginx=$(rpm -q nginx --queryformat '%{VERSION}')
+        ver_nginx=$(rpm -q nginx --queryformat '%{VERSION}' 2>/dev/null)
         if systemctl is-active --quiet nginx; then
             local puerto_nginx
             puerto_nginx=$(ss -tulnp | grep nginx | grep -oP ':\K[0-9]+' | head -1)
-            echo -e "${verde}Instalado y activo${nc} — version: $ver_nginx — puerto: ${puerto_nginx:-?}"
+            echo -e "${verde}Instalado y activo${nc} -- version: $ver_nginx -- puerto: ${puerto_nginx:-?}"
         else
-            echo -e "${amarillo}Instalado pero detenido${nc} — version: $ver_nginx"
+            echo -e "${amarillo}Instalado pero detenido${nc} -- version: $ver_nginx"
         fi
     else
         echo -e "${rojo}No instalado${nc}"
@@ -625,13 +628,16 @@ verificar_HTTP() {
     echo -en "  ${amarillo}Tomcat   :${nc} "
     if [[ -f /opt/tomcat/bin/startup.sh ]]; then
         local ver_tomcat
-        ver_tomcat=$(/opt/tomcat/bin/version.sh 2>/dev/null | grep "Server version" | grep -oP 'Tomcat/\K[0-9]+\.[0-9]+\.[0-9]+')
+        ver_tomcat=$(/opt/tomcat/bin/version.sh 2>/dev/null \
+            | grep "Server version" \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
+            | head -1)
         if systemctl is-active --quiet tomcat 2>/dev/null; then
             local puerto_tomcat
             puerto_tomcat=$(ss -tulnp | grep java | grep '\*:' | grep -oP '\*:\K[0-9]+' | head -1)
-            echo -e "${verde}Instalado y activo${nc} — version: ${ver_tomcat:-?} — puerto: ${puerto_tomcat:-?}"
+            echo -e "${verde}Instalado y activo${nc} -- version: ${ver_tomcat:-?} -- puerto: ${puerto_tomcat:-?}"
         else
-            echo -e "${amarillo}Instalado pero detenido${nc} — version: ${ver_tomcat:-?}"
+            echo -e "${amarillo}Instalado pero detenido${nc} -- version: ${ver_tomcat:-?}"
         fi
     else
         echo -e "${rojo}No instalado${nc}"
@@ -701,7 +707,7 @@ revisar_HTTP() {
 
     case $opcion in
         1) _curl_apache ;;
-        2) _curl_nginx ;;
+        2) _curl_nginx  ;;
         3) _curl_tomcat ;;
         4) _curl_apache; _curl_nginx; _curl_tomcat ;;
     esac
