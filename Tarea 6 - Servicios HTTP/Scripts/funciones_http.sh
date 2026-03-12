@@ -1,714 +1,608 @@
-#!/bin/bash
+# ============================================================
+# windows-funciones_http.ps1
+# Funciones para gestion de servidores HTTP en Windows Server 2022 Core
+# ============================================================
 
-FUNC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$FUNC_DIR/../../Funciones/Linux/colores.sh"
-source "$FUNC_DIR/../../Funciones/Linux/validaciones.sh"
+# =============== MENSAJES ===============
+function Write-Ok    { param($msg) Write-Host "[+] $msg" -ForegroundColor Green  }
+function Write-Info  { param($msg) Write-Host "[i] $msg" -ForegroundColor Cyan   }
+function Write-Err   { param($msg) Write-Host "[x] $msg" -ForegroundColor Red    }
+function Write-Warn  { param($msg) Write-Host "[!] $msg" -ForegroundColor Yellow }
+function Write-Title { param($msg) Write-Host "`n---- $msg ----`n" -ForegroundColor Magenta }
 
-VERSION_ELEGIDA=""
-PUERTO_ELEGIDO=""
-
-# =============== HABILITAR PUERTO EN SELINUX ===============
-habilitar_puerto_selinux() {
-    local puerto="$1"
-    local tipo="http_port_t"
-
-    if ! command -v semanage &>/dev/null; then
-        return 0
-    fi
-
-    if semanage port -l 2>/dev/null | grep "$tipo" | grep -qw "$puerto"; then
-        print_info "Puerto $puerto ya permitido en SELinux."
-        return 0
-    fi
-
-    if semanage port -a -t "$tipo" -p tcp "$puerto" 2>/dev/null; then
-        print_completado "Puerto $puerto habilitado en SELinux."
-    elif semanage port -m -t "$tipo" -p tcp "$puerto" 2>/dev/null; then
-        print_completado "Puerto $puerto modificado en SELinux."
-    else
-        print_info "No se pudo configurar SELinux para puerto $puerto (puede ser normal)."
-    fi
+# =============== RECARGAR PATH ===============
+function Refrescar-Path {
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+                [System.Environment]::GetEnvironmentVariable("Path","User")
 }
 
-# =============== OBTENER VERSIONES ===============
-obtener_versiones_zypper() {
-    local paquete="$1"
-    local versiones=()
-
-    # Metodo 1: rpm -q solo si ya esta instalado (evita el mensaje de error)
-    if rpm -q "$paquete" &>/dev/null; then
-        local ver_instalada
-        ver_instalada=$(rpm -q "$paquete" --queryformat '%{VERSION}' 2>/dev/null)
-        [[ -n "$ver_instalada" ]] && versiones+=("$ver_instalada")
-    fi
-
-    # Metodo 2: zypper info (consulta repo sin hacer search completo)
-    local ver_repo
-    ver_repo=$(timeout 15 zypper --quiet info "$paquete" 2>/dev/null \
-        | grep -i "^Version" \
-        | awk '{print $NF}' \
-        | grep -oE '^[0-9]+\.[0-9]+[^ ]*' \
-        | head -1)
-
-    if [[ -n "$ver_repo" && "$ver_repo" != "${versiones[0]:-}" ]]; then
-        versiones+=("$ver_repo")
-    fi
-
-    # Fallback si todo falla
-    if [[ ${#versiones[@]} -eq 0 ]]; then
-        case "$paquete" in
-            apache2) versiones=("2.4.63") ;;
-            nginx)   versiones=("1.26.2") ;;
-        esac
-        print_info "Usando version de referencia: ${versiones[*]}" >&2
-    fi
-
-    printf '%s\n' "${versiones[@]}"
-}
-
-obtener_versiones_tomcat() {
-    local base_url="https://dlcdn.apache.org/tomcat/"
-
-    print_info "Consultando versiones de Tomcat..." >&2
-
-    local ramas
-    ramas=$(timeout 8 curl -s "$base_url" 2>/dev/null \
-        | grep -oE 'tomcat-[0-9]+/' \
-        | grep -oE '[0-9]+' \
-        | sort -uV)
-
-    if [[ -z "$ramas" ]]; then
-        print_info "Sin acceso a internet. Usando versiones de referencia." >&2
-        echo "9.0.102"
-        echo "10.1.40"
-        echo "11.0.7"
+# =============== CHOCOLATEY ===============
+function Asegurar-Chocolatey {
+    Refrescar-Path
+    if (Get-Command choco -ErrorAction SilentlyContinue) {
+        Write-Info "Chocolatey disponible."
         return
-    fi
-
-    while IFS= read -r rama; do
-        local latest
-        latest=$(timeout 5 curl -s "${base_url}tomcat-${rama}/" 2>/dev/null \
-            | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+/' \
-            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
-            | sort -V | tail -1)
-        [[ -n "$latest" ]] && echo "$latest"
-    done <<< "$ramas"
+    }
+    Write-Info "Instalando Chocolatey..."
+    try {
+        Set-ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol =
+            [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        Invoke-Expression (
+            (New-Object System.Net.WebClient).DownloadString(
+                'https://community.chocolatey.org/install.ps1'
+            )
+        ) 2>&1 | Out-Null
+        Refrescar-Path
+        if (Get-Command choco -ErrorAction SilentlyContinue) {
+            Write-Ok "Chocolatey instalado correctamente."
+            return
+        }
+        $chocoDir = "$env:ALLUSERSPROFILE\chocolatey\bin"
+        if (Test-Path "$chocoDir\choco.exe") {
+            $env:Path += ";$chocoDir"
+            Write-Ok "Chocolatey instalado (PATH actualizado manualmente)."
+        } else {
+            Write-Err "No se pudo instalar Chocolatey. Verifica la conexion a internet."
+            exit 1
+        }
+    } catch {
+        Write-Err "Error instalando Chocolatey: $_"
+        exit 1
+    }
 }
 
-# =============== MENU VERSIONES ===============
-elegir_version() {
-    clear
-    local paquete="$1"
-    shift
-    local versiones=("$@")
-
-    if [[ ${#versiones[@]} -eq 0 ]]; then
-        print_error "No se encontraron versiones para '$paquete'."
-        print_info  "Verifica los repositorios: zypper repos"
-        return 1
-    fi
-
-    echo ""
-    echo -e "${azul}=== Versiones disponibles: $paquete ===${nc}"
-    echo ""
-
-    local i=1
-    local total=${#versiones[@]}
-    for ver in "${versiones[@]}"; do
-        local etiqueta=""
-        [[ $i -eq 1      ]] && etiqueta="  ${verde}[LTS / Estable]${nc}"
-        [[ $i -eq $total ]] && etiqueta="  ${naranja}[Latest / Desarrollo]${nc}"
-        echo -e "  ${amarillo}[$i]${nc} $ver$etiqueta"
-        (( i++ ))
-    done
-    echo ""
-
-    local sel
-    while true; do
-        echo -en "${cyan}Elige una version [1-$total]: ${nc}"
-        read -r sel
-        sel="${sel//[^0-9]/}"
-        if [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= total )); then
-            VERSION_ELEGIDA="${versiones[$((sel - 1))]}"
-            print_completado "Version elegida: $VERSION_ELEGIDA"
-            break
-        fi
-        print_error "Opcion invalida. Elige entre 1 y $total."
-    done
+# =============== VALIDAR PUERTO ===============
+function validarPuerto {
+    param([int]$puerto)
+    $reservados = @(21, 22, 23, 25, 53, 443, 3306, 3389, 5432, 6379, 27017)
+    if ($reservados -contains $puerto) {
+        Write-Warn "Puerto $puerto reservado para otro servicio."
+        return $false
+    }
+    $enUso = Get-NetTCPConnection -LocalPort $puerto -ErrorAction SilentlyContinue
+    if ($enUso) {
+        $proc = Get-Process -Id $enUso[0].OwningProcess -ErrorAction SilentlyContinue
+        Write-Warn "Puerto $puerto ocupado por: $($proc.ProcessName) (PID: $($enUso[0].OwningProcess))"
+        return $false
+    }
+    return $true
 }
 
-# =============== PEDIR PUERTO ================
-pedir_puerto() {
-    clear
-    echo ""
-    echo -e "${azul}=== Configuracion de Puerto ===${nc}"
-    echo ""
-    print_info "Puerto por defecto : 80"
-    print_info "Otros comunes      : 8080, 8888"
-    print_info "Bloqueados         : ${PUERTOS_RESERVADOS[*]}"
-    echo ""
-
-    local input
-    while true; do
-        echo -en "${cyan}Ingresa el puerto [Enter = 80]: ${nc}"
-        read -r input
-
-        [[ -z "$input" ]] && input="80"
-        input="${input//[^0-9]/}"
-
-        if [[ -z "$input" ]]; then
-            print_error "Ingresa un numero"
+# =============== PEDIR PUERTO ===============
+function pedirPuerto {
+    param([int]$default = 80)
+    Write-Host ""
+    Write-Host "=== Configuracion de Puerto ===" -ForegroundColor Blue
+    Write-Info "Puerto por defecto : $default"
+    Write-Info "Otros comunes      : 8080, 8888"
+    Write-Info "Bloqueados         : 21 22 23 25 53 443 3306 3389 5432 6379 27017"
+    Write-Host ""
+    while ($true) {
+        $inp = Read-Host "Puerto de escucha (Enter = $default)"
+        if ([string]::IsNullOrWhiteSpace($inp)) { $inp = "$default" }
+        if ($inp -notmatch '^\d+$') { Write-Warn "Ingresa solo numeros."; continue }
+        $puerto = [int]$inp
+        if ($puerto -ne 80 -and ($puerto -lt 1024 -or $puerto -gt 65535)) {
+            Write-Warn "Puerto fuera de rango. Usa 80 o entre 1024 y 65535."
             continue
-        fi
-
-        if validar_puerto "$input" "${PUERTOS_RESERVADOS[@]}"; then
-            PUERTO_ELEGIDO="$input"
-            print_completado "Puerto $PUERTO_ELEGIDO aceptado"
-            sleep 1
-            break
-        fi
-    done
+        }
+        if (validarPuerto -puerto $puerto) {
+            Write-Ok "Puerto $puerto aceptado."
+            return $puerto
+        }
+    }
 }
 
-# =============== INSTALAR APACHE2 ===============
-instalar_apache() {
-    print_titulo "Instalando Apache2..."
+# =============== FIREWALL ===============
+function configurarFirewall {
+    param([int]$puertoNuevo, [int]$puertoViejo = 80, [string]$nombreServicio = "HTTP")
+    Write-Info "Configurando firewall..."
+    Remove-NetFirewallRule -DisplayName "HTTP-$nombreServicio-$puertoViejo" -ErrorAction SilentlyContinue
+    New-NetFirewallRule `
+        -DisplayName "HTTP-$nombreServicio-$puertoNuevo" `
+        -Direction Inbound -Protocol TCP -LocalPort $puertoNuevo `
+        -Action Allow -Profile Any | Out-Null
+    Write-Ok "Firewall: puerto $puertoNuevo abierto para $nombreServicio."
+}
 
-    if ! zypper --non-interactive install apache2 apache2-utils &>/dev/null; then
-        print_error "Fallo la instalacion de Apache2."
-        return 1
-    fi
-    print_completado "Apache2 instalado."
+# =============== CREAR INDEX.HTML ===============
+function crearHTML {
+    param([string]$rutaWeb, [string]$servicio, [string]$version, [int]$puerto)
+    if (-not (Test-Path $rutaWeb)) {
+        New-Item -ItemType Directory -Path $rutaWeb -Force | Out-Null
+    }
+    # Usar WriteAllText con UTF8 sin BOM para evitar errores en nginx/apache
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    $contenido = @"
+<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><title>Servidor HTTP - Windows</title></head>
+<body>
+<h1>Windows - Servidor Activo</h1>
+<p>Servidor: $servicio</p>
+<p>Version: $version</p>
+<p>Puerto: $puerto</p>
+</body>
+</html>
+"@
+    [System.IO.File]::WriteAllText("$rutaWeb\index.html", $contenido, $utf8NoBom)
+    Write-Ok "index.html creado en $rutaWeb"
+}
 
-    # Leer version real ahora que ya esta instalado
-    local ver_real
-    ver_real=$(rpm -q apache2 --queryformat '%{VERSION}' 2>/dev/null)
-    [[ -n "$ver_real" ]] && VERSION_ELEGIDA="$ver_real"
+# =============== BUSCAR RUTA NGINX ===============
+function Obtener-Ruta-Nginx {
+    # Choco v2 instala en: C:\ProgramData\chocolatey\lib\nginx\tools\nginx-VERSION\
+    $libPath = "C:\ProgramData\chocolatey\lib\nginx\tools"
+    if (Test-Path $libPath) {
+        $exe = Get-ChildItem $libPath -Filter "nginx.exe" -Recurse `
+            -ErrorAction SilentlyContinue -Depth 3 | Select-Object -First 1
+        if ($exe) { return $exe.DirectoryName }
+    }
+    # Choco v1/herramienta instala en C:\tools\nginx-VERSION\
+    if (Test-Path "C:\tools") {
+        $exe = Get-ChildItem "C:\tools" -Filter "nginx.exe" -Recurse `
+            -ErrorAction SilentlyContinue -Depth 5 | Select-Object -First 1
+        if ($exe) { return $exe.DirectoryName }
+    }
+    # Rutas directas alternativas
+    foreach ($r in @("C:\nginx", "C:\nginx\nginx")) {
+        if (Test-Path "$r\nginx.exe") { return $r }
+    }
+    # Busqueda amplia - excluir bin\ de choco (es shim, no el exe real)
+    $exe = Get-ChildItem "C:\" -Filter "nginx.exe" -Recurse `
+        -ErrorAction SilentlyContinue -Depth 7 |
+        Where-Object { $_.FullName -notlike "*\bin\*" } |
+        Select-Object -First 1
+    if ($exe) { return $exe.DirectoryName }
+    return $null
+}
+# =============== INSTALAR IIS ===============
+function instalarIIS {
+    param([int]$puerto)
+    Write-Title "Instalando IIS..."
+    $winVer = (Get-WmiObject Win32_OperatingSystem).Caption
+    $iisVersion = switch -Wildcard ($winVer) {
+        "*Server 2022*" { "10.0" } "*Server 2019*" { "10.0" }
+        "*Server 2016*" { "10.0" } "*Server 2012*" { "8.5"  }
+        "*Windows 1*"   { "10.0" } default          { "10.0" }
+    }
+    Write-Info "Sistema: $winVer"
+    Write-Info "Version IIS disponible: $iisVersion (determinada por Windows)"
+    Write-Host ""
+    $confirmar = Read-Host "Instalar IIS $iisVersion en puerto $puerto? (s/n)"
+    if ($confirmar -ne 's') { return }
 
-    local listen_conf="/etc/apache2/listen.conf"
-    cp "$listen_conf" "${listen_conf}.bak" 2>/dev/null
-    sed -i "s/^Listen 80$/Listen ${PUERTO_ELEGIDO}/" "$listen_conf"
-    print_completado "Puerto configurado -> Listen $PUERTO_ELEGIDO"
+    $features = @("Web-Server","Web-Common-Http","Web-Static-Content",
+                  "Web-Default-Doc","Web-Http-Errors","Web-Security",
+                  "Web-Filtering","Web-Http-Logging","Web-Stat-Compression")
+    foreach ($f in $features) {
+        Install-WindowsFeature -Name $f -ErrorAction SilentlyContinue | Out-Null
+    }
+    Write-Ok "IIS instalado."
 
-    cat > /etc/apache2/vhosts.d/tarea6.conf << EOF
-<VirtualHost *:${PUERTO_ELEGIDO}>
-    DocumentRoot "${APACHE_WEBROOT}"
-    ServerName localhost
-    <Directory "${APACHE_WEBROOT}">
-        Options -Indexes -FollowSymLinks
-        AllowOverride None
-        Require all granted
-        <LimitExcept GET POST HEAD OPTIONS>
-            Require all denied
-        </LimitExcept>
-    </Directory>
-    ErrorLog  /var/log/apache2/tarea6-error.log
-    CustomLog /var/log/apache2/tarea6-access.log combined
-</VirtualHost>
-EOF
-    print_completado "VirtualHost creado."
+    $appcmd = "$env:SystemRoot\system32\inetsrv\appcmd.exe"
+    & $appcmd set site "Default Web Site" /bindings:"http/*:${puerto}:" 2>&1 | Out-Null
+    Write-Ok "Puerto configurado: $puerto"
 
-    local sec_conf="/etc/apache2/conf.d/security.conf"
-    cp "$sec_conf" "${sec_conf}.bak" 2>/dev/null
-    cat > "$sec_conf" << 'EOF'
+    $webConfig = "$env:SystemDrive\inetpub\wwwroot\web.config"
+    Set-Content -Path $webConfig -Encoding UTF8 -Value @"
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <system.webServer>
+    <security>
+      <requestFiltering removeServerHeader="true">
+        <verbs>
+          <add verb="TRACE" allowed="false" />
+          <add verb="TRACK" allowed="false" />
+        </verbs>
+      </requestFiltering>
+    </security>
+    <httpProtocol>
+      <customHeaders>
+        <remove name="X-Powered-By" />
+        <add name="X-Frame-Options"        value="SAMEORIGIN" />
+        <add name="X-Content-Type-Options" value="nosniff"    />
+      </customHeaders>
+    </httpProtocol>
+  </system.webServer>
+</configuration>
+"@
+    Write-Ok "Seguridad configurada (web.config)."
+
+    $webroot = "$env:SystemDrive\inetpub\wwwroot"
+    $acl  = Get-Acl $webroot
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        "IIS_IUSRS","ReadAndExecute","ContainerInherit,ObjectInherit","None","Allow")
+    $acl.SetAccessRule($rule)
+    Set-Acl $webroot $acl
+    Write-Ok "Permisos aplicados: IIS_IUSRS -> ReadAndExecute."
+
+    crearHTML -rutaWeb $webroot -servicio "IIS" -version $iisVersion -puerto $puerto
+    configurarFirewall -puertoNuevo $puerto -puertoViejo 80 -nombreServicio "IIS"
+
+    Start-Service W3SVC -ErrorAction SilentlyContinue
+    Set-Service   W3SVC -StartupType Automatic
+    Start-Sleep -Seconds 2
+
+    $svc = Get-Service W3SVC -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -eq "Running") {
+        Write-Ok "IIS activo en puerto $puerto"
+    } else {
+        Write-Err "IIS no arranco. Revisa el Visor de Eventos."
+    }
+}
+
+# =============== INSTALAR APACHE ===============
+function instalarApache {
+    param([int]$puerto)
+    Write-Title "Instalando Apache HTTP Server..."
+    Asegurar-Chocolatey
+
+    Write-Info "Consultando versiones disponibles de apache-httpd..."
+    $rawVersiones = choco search apache-httpd --exact --all-versions --limit-output 2>$null
+    $versiones = @()
+    foreach ($linea in $rawVersiones) {
+        if ($linea -match '\|') {
+            $ver = ($linea -split '\|')[1].Trim()
+            if ($ver -match '^\d+\.\d+' -and $versiones -notcontains $ver) { $versiones += $ver }
+        }
+    }
+    if ($versiones.Count -eq 0) { Write-Err "No se encontraron versiones. Verifica internet."; return }
+
+    Write-Host ""
+    Write-Host "Versiones disponibles:" -ForegroundColor Cyan
+    $limite = [Math]::Min($versiones.Count, 3)
+    for ($i = 0; $i -lt $limite; $i++) {
+        $etiqueta = switch ($i) {
+            0 { "[Latest - Desarrollo]" } 1 { "[Estable anterior]" } 2 { "[LTS]" }
+        }
+        Write-Host "  $($i+1). $($versiones[$i])  $etiqueta"
+    }
+    Write-Host ""
+    do { $selVer = Read-Host "Selecciona version (1-$limite)" } while ($selVer -notmatch "^[1-$limite]$")
+    $versionElegida = $versiones[[int]$selVer - 1]
+
+    Write-Info "Instalando Apache $versionElegida en puerto $puerto..."
+    choco install apache-httpd `
+        --version="$versionElegida" `
+        --params="`"/port:$puerto /installLocation:C:\Apache24`"" `
+        --yes --no-progress --force 2>&1 | Out-Null
+
+    if ($LASTEXITCODE -ne 0) { Write-Err "Fallo la instalacion. Codigo: $LASTEXITCODE"; return }
+    Refrescar-Path
+
+    # Buscar donde quedo instalado (el param /installLocation no siempre aplica)
+    $posibles = @("C:\Apache24","$env:APPDATA\Apache24","$env:LOCALAPPDATA\Apache24")
+    $apacheRoot = $posibles | Where-Object { Test-Path "$_\bin\httpd.exe" } | Select-Object -First 1
+    if (-not $apacheRoot) {
+        $httpd = Get-ChildItem "C:\" -Filter "httpd.exe" -Recurse `
+            -ErrorAction SilentlyContinue -Depth 6 | Select-Object -First 1
+        if ($httpd) { $apacheRoot = $httpd.DirectoryName -replace '\\bin$','' }
+    }
+    if (-not $apacheRoot) { Write-Err "No se encontro la instalacion de Apache."; return }
+    Write-Ok "Apache instalado en: $apacheRoot"
+
+    $httpdConf = "$apacheRoot\conf\httpd.conf"
+    if (Test-Path $httpdConf) {
+        $conf = Get-Content $httpdConf -Raw
+        if ($conf -notmatch "Listen\s+$puerto") {
+            $conf = $conf -replace 'Listen\s+\d+', "Listen $puerto"
+            Set-Content $httpdConf $conf -Encoding UTF8
+            Write-Ok "Puerto $puerto aplicado en httpd.conf."
+        }
+        if ($conf -notmatch 'TAREA6-SECURITY') {
+            Add-Content -Path $httpdConf -Value @"
+
+# TAREA6-SECURITY-START
 ServerTokens Prod
 ServerSignature Off
 
-<IfModule mod_headers.c>
-    Header always set X-Frame-Options "SAMEORIGIN"
-    Header always set X-Content-Type-Options "nosniff"
-</IfModule>
-EOF
-    command -v a2enmod &>/dev/null && a2enmod headers &>/dev/null
-    print_completado "Seguridad configurada."
+<LimitExcept GET POST HEAD>
+    Require all denied
+</LimitExcept>
 
-    mkdir -p "$APACHE_WEBROOT"
-    cat > "${APACHE_WEBROOT}/index.html" << EOF
-<!DOCTYPE html>
-<html lang="es">
-<head><meta charset="UTF-8"><title>Apache2</title></head>
-<body>
-<h1>Servidor: Apache2</h1>
-<p>Version: ${VERSION_ELEGIDA}</p>
-<p>Puerto: ${PUERTO_ELEGIDO}</p>
-</body>
-</html>
-EOF
-    print_completado "index.html creado."
+Header always set X-Frame-Options "SAMEORIGIN"
+Header always set X-Content-Type-Options "nosniff"
+# TAREA6-SECURITY-END
+"@
+            Write-Ok "Seguridad configurada en httpd.conf."
+        }
+    }
 
-    chown -R wwwrun:www "$APACHE_WEBROOT"
-    chmod 750 "$APACHE_WEBROOT"
-    print_completado "Permisos aplicados -> wwwrun:www (chmod 750)."
+    crearHTML -rutaWeb "$apacheRoot\htdocs" -servicio "Apache HTTP Server" -version $versionElegida -puerto $puerto
+    configurarFirewall -puertoNuevo $puerto -puertoViejo 80 -nombreServicio "Apache"
 
-    if systemctl is-active --quiet firewalld 2>/dev/null; then
-        firewall-cmd --permanent --add-port="${PUERTO_ELEGIDO}/tcp" &>/dev/null
-        [[ "$PUERTO_ELEGIDO" -ne 80 ]] && firewall-cmd --permanent --remove-port=80/tcp &>/dev/null
-        firewall-cmd --reload &>/dev/null
-        print_completado "Firewall: puerto $PUERTO_ELEGIDO abierto."
-    fi
-
-    habilitar_puerto_selinux "$PUERTO_ELEGIDO"
-
-    systemctl enable apache2 &>/dev/null
-    systemctl restart apache2 &>/dev/null
-    sleep 2
-
-    if systemctl is-active --quiet apache2; then
-        local ip
-        ip=$(ip addr show "$INTERFAZ_RED" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
-        print_completado "Apache2 activo en puerto $PUERTO_ELEGIDO"
-        print_info "Prueba: curl -I http://${ip}:${PUERTO_ELEGIDO}"
-    else
-        print_error "Apache2 no arranco."
-        print_info  "Revisa: journalctl -u apache2 -n 20"
-        return 1
-    fi
+    $svc = Get-Service -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
+    if (-not $svc) {
+        $httpdExe = "$apacheRoot\bin\httpd.exe"
+        if (Test-Path $httpdExe) {
+            Write-Info "Registrando servicio Apache..."
+            & $httpdExe -k install 2>&1 | Out-Null
+            Start-Sleep -Seconds 2
+            $svc = Get-Service -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
+        }
+    }
+    if ($svc) {
+        Start-Service $svc.Name -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+        $svc = Get-Service $svc.Name -ErrorAction SilentlyContinue
+        if ($svc.Status -eq "Running") {
+            Write-Ok "Apache activo en puerto $puerto"
+        } else {
+            Write-Err "Apache no arranco. Revisa: $apacheRoot\logs\error.log"
+        }
+    } else {
+        Write-Err "No se pudo registrar el servicio Apache."
+    }
 }
 
 # =============== INSTALAR NGINX ===============
-instalar_nginx() {
-    print_titulo "Instalando Nginx..."
+function instalarNginx {
+    param([int]$puerto)
+    Write-Title "Instalando Nginx..."
+    Asegurar-Chocolatey
 
-    if ! zypper --non-interactive install nginx &>/dev/null; then
-        print_error "Fallo la instalacion de Nginx."
-        return 1
-    fi
-    print_completado "Nginx instalado."
+    Write-Info "Consultando versiones disponibles de Nginx..."
+    $rawVersiones = choco search nginx --exact --all-versions --limit-output 2>$null
+    $versiones = @()
+    foreach ($linea in $rawVersiones) {
+        if ($linea -match '\|') {
+            $ver = ($linea -split '\|')[1].Trim()
+            if ($ver -match '^\d+\.\d+' -and $versiones -notcontains $ver) { $versiones += $ver }
+        }
+    }
+    if ($versiones.Count -eq 0) { Write-Err "No se encontraron versiones de Nginx."; return }
 
-    # Leer version real ahora que ya esta instalado
-    local ver_real
-    ver_real=$(rpm -q nginx --queryformat '%{VERSION}' 2>/dev/null)
-    [[ -n "$ver_real" ]] && VERSION_ELEGIDA="$ver_real"
+    $mainline = $versiones | Where-Object {
+        $p = $_ -split '\.'; $p.Count -ge 2 -and ([int]$p[1] % 2 -ne 0)
+    } | Select-Object -First 1
+    $stable = $versiones | Where-Object {
+        $p = $_ -split '\.'; $p.Count -ge 2 -and ([int]$p[1] % 2 -eq 0)
+    } | Select-Object -First 1
+    if (-not $mainline) { $mainline = $versiones[0] }
+    if (-not $stable)   { $stable   = if ($versiones.Count -ge 2) { $versiones[1] } else { $versiones[0] } }
 
-    if ! id "www-nginx" &>/dev/null; then
-        useradd -r -s /sbin/nologin -d "$NGINX_WEBROOT" -M www-nginx
-        print_completado "Usuario www-nginx creado."
-    else
-        print_info "Usuario www-nginx: ok."
-    fi
+    Write-Host ""
+    Write-Host "Versiones disponibles:" -ForegroundColor Cyan
+    Write-Host "  1. $mainline  [Mainline - Desarrollo]"
+    Write-Host "  2. $stable    [Stable - LTS]"
+    Write-Host ""
+    do { $selVer = Read-Host "Selecciona version (1/2)" } while ($selVer -notmatch '^[12]$')
+    $versionElegida = if ($selVer -eq "1") { $mainline } else { $stable }
 
-    mkdir -p /etc/systemd/system/nginx.service.d/
-    cat > /etc/systemd/system/nginx.service.d/override.conf << 'OVERRIDE'
-[Service]
-ProtectSystem=off
-OVERRIDE
-    systemctl daemon-reload
-    print_completado "Override de systemd configurado."
+    Write-Info "Instalando Nginx $versionElegida..."
+    choco install nginx --version="$versionElegida" --yes --no-progress --force 2>&1 | Out-Null
+    # choco puede retornar exit 0 aunque no reinstale (ya instalado); no cortar aqui
+    Refrescar-Path
 
-    cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak 2>/dev/null
-    cat > /etc/nginx/nginx.conf << NGINXEOF
-user www-nginx;
-worker_processes auto;
-pid /run/nginx.pid;
+    # Verificar que nginx.exe exista antes de continuar
+    $nginxRootCheck = Obtener-Ruta-Nginx
+    if (-not $nginxRootCheck) {
+        Write-Err "No se encontro nginx.exe. Verifica la instalacion de Chocolatey."
+        Write-Info "Intenta manualmente: choco install nginx --version=$versionElegida --force"
+        return
+    }
+    Write-Ok "Nginx $versionElegida disponible en: $nginxRootCheck"
+
+    if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
+        Write-Info "Instalando NSSM..."
+        choco install nssm --yes --no-progress 2>&1 | Out-Null
+        Refrescar-Path
+    }
+
+    $nginxRoot = Obtener-Ruta-Nginx
+    if (-not $nginxRoot) { Write-Err "No se encontro nginx.exe tras la instalacion."; return }
+    Write-Info "Nginx encontrado en: $nginxRoot"
+
+    $nginxConf = "$nginxRoot\conf\nginx.conf"
+    # Escribir nginx.conf completo sin BOM (BOM causa "unknown directive" en nginx)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    $nginxConfContent = @"
+worker_processes  1;
 
 events {
-    worker_connections 1024;
+    worker_connections  1024;
 }
 
 http {
-    include      /etc/nginx/mime.types;
-    default_type application/octet-stream;
+    include       mime.types;
+    default_type  application/octet-stream;
 
     server_tokens off;
 
-    add_header X-Frame-Options        "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff"    always;
-
-    sendfile on;
-    keepalive_timeout 65;
+    sendfile        on;
+    keepalive_timeout  65;
 
     server {
-        listen      ${PUERTO_ELEGIDO};
-        server_name localhost;
-        root        ${NGINX_WEBROOT};
-        index       index.html;
+        listen       $puerto;
+        server_name  localhost;
 
-        if (\$request_method !~ ^(GET|POST|HEAD|OPTIONS)$) {
-            return 405;
-        }
+        add_header X-Frame-Options SAMEORIGIN always;
+        add_header X-Content-Type-Options nosniff always;
 
         location / {
-            try_files \$uri \$uri/ =404;
+            root   html;
+            index  index.html index.htm;
             autoindex off;
         }
 
-        access_log /var/log/nginx/access.log;
-        error_log  /var/log/nginx/error.log;
+        error_page   500 502 503 504  /50x.html;
+        location = /50x.html {
+            root   html;
+        }
     }
 }
-NGINXEOF
-    print_completado "nginx.conf configurado con puerto $PUERTO_ELEGIDO"
+"@
+    [System.IO.File]::WriteAllText($nginxConf, $nginxConfContent, $utf8NoBom)
+    Write-Ok "nginx.conf escrito sin BOM, puerto $puerto configurado."
 
-    touch /run/nginx.pid
-    chown www-nginx:www-nginx /run/nginx.pid
-    restorecon -v /run/nginx.pid &>/dev/null
-    print_completado "Contexto SELinux de nginx.pid configurado."
+    crearHTML -rutaWeb "$nginxRoot\html" -servicio "Nginx" -version $versionElegida -puerto $puerto
+    configurarFirewall -puertoNuevo $puerto -puertoViejo 80 -nombreServicio "Nginx"
 
-    if ! nginx -t &>/dev/null; then
-        print_error "Error de sintaxis en nginx.conf."
-        nginx -t
-        return 1
-    fi
-    print_completado "Sintaxis verificada."
+    $serviceName = "nginx-$puerto"
+    $nginxExe    = "$nginxRoot\nginx.exe"
+    $svcAnterior = Get-Service $serviceName -ErrorAction SilentlyContinue
+    if ($svcAnterior) {
+        Stop-Service $serviceName -Force -ErrorAction SilentlyContinue
+        & nssm remove $serviceName confirm 2>&1 | Out-Null
+    }
+    & nssm install $serviceName $nginxExe 2>&1 | Out-Null
+    & nssm set     $serviceName AppDirectory $nginxRoot 2>&1 | Out-Null
+    & nssm set     $serviceName DisplayName "Nginx HTTP Server (puerto $puerto)" 2>&1 | Out-Null
+    & nssm set     $serviceName Start SERVICE_AUTO_START 2>&1 | Out-Null
+    & nssm set     $serviceName AppStdout "$nginxRoot\logs\service.log" 2>&1 | Out-Null
+    & nssm set     $serviceName AppStderr "$nginxRoot\logs\service-error.log" 2>&1 | Out-Null
 
-    mkdir -p "$NGINX_WEBROOT"
-    cat > "${NGINX_WEBROOT}/index.html" << EOF
-<!DOCTYPE html>
-<html lang="es">
-<head><meta charset="UTF-8"><title>Nginx</title></head>
-<body>
-<h1>Servidor: Nginx</h1>
-<p>Version: ${VERSION_ELEGIDA}</p>
-<p>Puerto: ${PUERTO_ELEGIDO}</p>
-</body>
-</html>
-EOF
-    print_completado "index.html creado."
-
-    chown -R www-nginx:www-nginx "$NGINX_WEBROOT"
-    chmod 750 "$NGINX_WEBROOT"
-    print_completado "Permisos aplicados -> www-nginx:www-nginx (chmod 750)."
-
-    if systemctl is-active --quiet firewalld 2>/dev/null; then
-        firewall-cmd --permanent --add-port="${PUERTO_ELEGIDO}/tcp" &>/dev/null
-        [[ "$PUERTO_ELEGIDO" -ne 80 ]] && firewall-cmd --permanent --remove-port=80/tcp &>/dev/null
-        firewall-cmd --reload &>/dev/null
-        print_completado "Firewall: puerto $PUERTO_ELEGIDO abierto."
-    fi
-
-    habilitar_puerto_selinux "$PUERTO_ELEGIDO"
-
-    systemctl enable nginx &>/dev/null
-    systemctl restart nginx &>/dev/null
-    sleep 2
-
-    if systemctl is-active --quiet nginx; then
-        local ip
-        ip=$(ip addr show "$INTERFAZ_RED" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
-        print_completado "Nginx activo en puerto $PUERTO_ELEGIDO"
-        print_info "Prueba: curl -I http://${ip}:${PUERTO_ELEGIDO}"
-    else
-        print_error "Nginx no arranco."
-        print_info  "Revisa: journalctl -u nginx -n 20"
-        return 1
-    fi
+    Start-Service $serviceName -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+    $svc = Get-Service $serviceName -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -eq "Running") {
+        Write-Ok "Nginx activo en puerto $puerto (servicio: $serviceName)"
+    } else {
+        Write-Err "Nginx no arranco. Revisa: $nginxRoot\logs\error.log"
+        Write-Info "O inicia manualmente: nssm start $serviceName"
+    }
 }
 
-# =============== INSTALAR TOMCAT ===============
-instalar_tomcat() {
-    print_titulo "Instalando Apache Tomcat $VERSION_ELEGIDA..."
-
-    local rama="${VERSION_ELEGIDA%%.*}"
-    local url="https://dlcdn.apache.org/tomcat/tomcat-${rama}/v${VERSION_ELEGIDA}/bin/apache-tomcat-${VERSION_ELEGIDA}.tar.gz"
-    local tarball="/tmp/apache-tomcat-${VERSION_ELEGIDA}.tar.gz"
-
-    if ! command -v java &>/dev/null; then
-        print_info "Java no encontrado. Instalando OpenJDK 21..."
-        print_info "Esto puede tardar varios minutos, por favor espera..."
-        zypper --non-interactive install java-21-openjdk java-21-openjdk-headless 2>&1 \
-            | grep -E "^Instalando|^Installing|^Descargando|^Downloading|[Ee]rror"
-        if ! command -v java &>/dev/null; then
-            print_error "No se pudo instalar Java."
-            print_info  "Intenta manualmente: zypper install java-21-openjdk"
-            return 1
-        fi
-        print_completado "Java instalado: $(java -version 2>&1 | head -1)"
-    else
-        print_completado "Java: $(java -version 2>&1 | head -1)"
-    fi
-
-    print_info "Descargando Tomcat $VERSION_ELEGIDA..."
-    if ! curl -L --progress-bar -o "$tarball" "$url" 2>&1; then
-        print_error "Fallo la descarga."
-        print_info  "URL: $url"
-        return 1
-    fi
-
-    print_info "Extrayendo en /opt/tomcat..."
-    mkdir -p /opt/tomcat
-    if ! tar xzf "$tarball" -C /opt/tomcat --strip-components=1; then
-        print_error "Fallo la extraccion."
-        rm -f "$tarball"
-        return 1
-    fi
-    rm -f "$tarball"
-    print_completado "Tomcat extraido en /opt/tomcat"
-
-    cp /opt/tomcat/conf/server.xml /opt/tomcat/conf/server.xml.bak
-    sed -i "s/port=\"8080\"/port=\"${PUERTO_ELEGIDO}\"/" /opt/tomcat/conf/server.xml
-    sed -i 's/port="8009"/port="-1"/' /opt/tomcat/conf/server.xml
-    print_completado "Puerto configurado en server.xml -> $PUERTO_ELEGIDO"
-    print_completado "Conector AJP deshabilitado."
-
-    sed -i 's|</web-app>||' /opt/tomcat/conf/web.xml
-    cat >> /opt/tomcat/conf/web.xml << 'WEBXMLEOF'
-    <filter>
-        <filter-name>httpHeaderSecurity</filter-name>
-        <filter-class>org.apache.catalina.filters.HttpHeaderSecurityFilter</filter-class>
-        <init-param>
-            <param-name>antiClickJackingOption</param-name>
-            <param-value>SAMEORIGIN</param-value>
-        </init-param>
-        <init-param>
-            <param-name>blockContentTypeSniffingEnabled</param-name>
-            <param-value>true</param-value>
-        </init-param>
-    </filter>
-    <filter-mapping>
-        <filter-name>httpHeaderSecurity</filter-name>
-        <url-pattern>/*</url-pattern>
-    </filter-mapping>
-</web-app>
-WEBXMLEOF
-    print_completado "Headers de seguridad configurados en web.xml."
-
-    if ! id "tomcat" &>/dev/null; then
-        useradd -r -s /sbin/nologin -d /opt/tomcat -M tomcat
-        print_completado "Usuario tomcat creado."
-    else
-        print_info "Usuario tomcat ya existe."
-    fi
-
-    mkdir -p "$TOMCAT_WEBROOT"
-    cat > "${TOMCAT_WEBROOT}/index.html" << EOF
-<!DOCTYPE html>
-<html lang="es">
-<head><meta charset="UTF-8"><title>Tomcat</title></head>
-<body>
-<h1>Servidor: Apache Tomcat</h1>
-<p>Version: ${VERSION_ELEGIDA}</p>
-<p>Puerto: ${PUERTO_ELEGIDO}</p>
-</body>
-</html>
-EOF
-    print_completado "index.html creado."
-
-    chown -R tomcat:tomcat /opt/tomcat
-    chmod 750 /opt/tomcat
-    chmod 750 /opt/tomcat/conf
-    print_completado "Permisos aplicados -> tomcat:tomcat (chmod 750)."
-
-    local java_home
-    java_home=$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")
-
-    cat > /etc/systemd/system/tomcat.service << SVCEOF
-[Unit]
-Description=Apache Tomcat ${VERSION_ELEGIDA}
-After=network.target
-
-[Service]
-Type=forking
-User=tomcat
-Group=tomcat
-Environment="JAVA_HOME=${java_home}"
-Environment="CATALINA_HOME=/opt/tomcat"
-Environment="CATALINA_BASE=/opt/tomcat"
-Environment="CATALINA_PID=/opt/tomcat/temp/tomcat.pid"
-Environment="CATALINA_OPTS=-Xms256M -Xmx512M"
-ExecStart=/opt/tomcat/bin/startup.sh
-ExecStop=/opt/tomcat/bin/shutdown.sh
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-SVCEOF
-
-    systemctl daemon-reload
-    print_completado "Servicio systemd registrado."
-
-    if systemctl is-active --quiet firewalld 2>/dev/null; then
-        firewall-cmd --permanent --add-port="${PUERTO_ELEGIDO}/tcp" &>/dev/null
-        [[ "$PUERTO_ELEGIDO" -ne 8080 ]] && firewall-cmd --permanent --remove-port=8080/tcp &>/dev/null
-        firewall-cmd --reload &>/dev/null
-        print_completado "Firewall: puerto $PUERTO_ELEGIDO abierto."
-    fi
-
-    systemctl enable tomcat &>/dev/null
-    systemctl start tomcat &>/dev/null
-    print_info "Esperando que Tomcat inicie..."
-    sleep 10
-
-    if systemctl is-active --quiet tomcat; then
-        local ip
-        ip=$(ip addr show "$INTERFAZ_RED" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
-        print_completado "Tomcat activo en puerto $PUERTO_ELEGIDO"
-        print_info "Prueba: curl -I http://${ip}:${PUERTO_ELEGIDO}"
-    else
-        print_error "Tomcat no arranco."
-        print_info  "Revisa: journalctl -u tomcat -n 20"
-        print_info  "O bien: cat /opt/tomcat/logs/catalina.out"
-        return 1
-    fi
-}
-
-# =============== MENU INSTALACION ===============
-instalar_HTTP() {
-    clear
-    echo ""
-    echo -e "${azul}=== Instalacion de Servidor HTTP ===${nc}"
-    echo ""
-    echo -e "  ${amarillo}[1]${nc} Apache2"
-    echo -e "  ${amarillo}[2]${nc} Nginx"
-    echo -e "  ${amarillo}[3]${nc} Apache Tomcat"
-    echo ""
-
-    local opcion
-    while true; do
-        echo -en "${cyan}Selecciona un servidor [1-3]: ${nc}"
-        read -r opcion
-        opcion="${opcion//[^0-9]/}"
-        [[ "$opcion" =~ ^[123]$ ]] && break
-        print_error "Opcion invalida"
-    done
-
-    local versiones=()
-
-    case $opcion in
-        1)
-            print_info "Consultando versiones de Apache2..."
-            mapfile -t versiones < <(obtener_versiones_zypper "apache2")
-            elegir_version "Apache2" "${versiones[@]}" || return 1
-            pedir_puerto
-            instalar_apache
-            ;;
-        2)
-            print_info "Consultando versiones de Nginx..."
-            mapfile -t versiones < <(obtener_versiones_zypper "nginx")
-            elegir_version "Nginx" "${versiones[@]}" || return 1
-            pedir_puerto
-            instalar_nginx
-            ;;
-        3)
-            mapfile -t versiones < <(obtener_versiones_tomcat)
-            elegir_version "Apache Tomcat" "${versiones[@]}" || return 1
-            pedir_puerto
-            instalar_tomcat
-            ;;
-    esac
+# =============== INSTALAR HTTP (menu interno) ===============
+function InstalarHTTP {
+    Clear-Host
+    Write-Host ""
+    Write-Host "------------------------------------------------" -ForegroundColor Blue
+    Write-Host "         INSTALACION DE SERVIDOR HTTP           " -ForegroundColor Blue
+    Write-Host "------------------------------------------------" -ForegroundColor Blue
+    Write-Host "  1. IIS  (nativo Windows)"
+    Write-Host "  2. Apache HTTP Server"
+    Write-Host "  3. Nginx"
+    Write-Host "  0. Volver"
+    Write-Host "------------------------------------------------" -ForegroundColor Blue
+    Write-Host ""
+    $s = Read-Host "Servidor"
+    if ($s -eq "0") { return }
+    if ($s -notin @("1","2","3")) { Write-Warn "Opcion no valida."; return }
+    $puerto = pedirPuerto -default 80
+    switch ($s) {
+        "1" { instalarIIS    -puerto $puerto }
+        "2" { instalarApache -puerto $puerto }
+        "3" { instalarNginx  -puerto $puerto }
+    }
 }
 
 # =============== VERIFICAR ESTADO ===============
-verificar_HTTP() {
-    clear
-    echo ""
-    echo -e "${azul}=== Estado de Servidores HTTP ===${nc}"
-    echo ""
+function VerificarHTTP {
+    Clear-Host
+    Write-Host ""
+    Write-Host "=== Estado de Servidores HTTP ===" -ForegroundColor Blue
+    Write-Host ""
 
-    echo -en "  ${amarillo}Apache2  :${nc} "
-    if rpm -q apache2 &>/dev/null; then
-        local ver_apache
-        ver_apache=$(rpm -q apache2 --queryformat '%{VERSION}' 2>/dev/null)
-        if systemctl is-active --quiet apache2; then
-            local puerto_apache
-            puerto_apache=$(ss -tulnp | grep -E 'httpd|apache2' | grep -oP ':\K[0-9]+' | head -1)
-            echo -e "${verde}Instalado y activo${nc} -- version: $ver_apache -- puerto: ${puerto_apache:-?}"
-        else
-            echo -e "${amarillo}Instalado pero detenido${nc} -- version: $ver_apache"
-        fi
-    else
-        echo -e "${rojo}No instalado${nc}"
-    fi
+    Write-Host -NoNewline "  IIS     : "
+    $iis = Get-Service W3SVC -ErrorAction SilentlyContinue
+    if ($iis) {
+        $ver    = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\InetStp" -ErrorAction SilentlyContinue).VersionString
+        $appcmd = "$env:SystemRoot\system32\inetsrv\appcmd.exe"
+        $puerto = & $appcmd list site "Default Web Site" 2>$null |
+            Select-String ':(\d+):' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
+        if ($iis.Status -eq "Running") {
+            Write-Host "Activo -- version: $ver -- puerto: $puerto" -ForegroundColor Green
+        } else { Write-Host "Detenido -- version: $ver" -ForegroundColor Yellow }
+    } else { Write-Host "No instalado" -ForegroundColor Red }
 
-    echo -en "  ${amarillo}Nginx    :${nc} "
-    if rpm -q nginx &>/dev/null; then
-        local ver_nginx
-        ver_nginx=$(rpm -q nginx --queryformat '%{VERSION}' 2>/dev/null)
-        if systemctl is-active --quiet nginx; then
-            local puerto_nginx
-            puerto_nginx=$(ss -tulnp | grep nginx | grep -oP ':\K[0-9]+' | head -1)
-            echo -e "${verde}Instalado y activo${nc} -- version: $ver_nginx -- puerto: ${puerto_nginx:-?}"
-        else
-            echo -e "${amarillo}Instalado pero detenido${nc} -- version: $ver_nginx"
-        fi
-    else
-        echo -e "${rojo}No instalado${nc}"
-    fi
+    Write-Host -NoNewline "  Apache2 : "
+    $apache = Get-Service -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^Apache" } | Select-Object -First 1
+    if ($apache) {
+        $apacheRoot = @("C:\Apache24","$env:APPDATA\Apache24") |
+            Where-Object { Test-Path "$_\conf\httpd.conf" } | Select-Object -First 1
+        $puerto = if ($apacheRoot) {
+            Get-Content "$apacheRoot\conf\httpd.conf" |
+                Select-String '^Listen\s+(\d+)' |
+                ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
+        } else { "?" }
+        if ($apache.Status -eq "Running") {
+            Write-Host "Activo -- puerto: $puerto" -ForegroundColor Green
+        } else { Write-Host "Detenido -- puerto: $puerto" -ForegroundColor Yellow }
+    } else { Write-Host "No instalado" -ForegroundColor Red }
 
-    echo -en "  ${amarillo}Tomcat   :${nc} "
-    if [[ -f /opt/tomcat/bin/startup.sh ]]; then
-        local ver_tomcat
-        ver_tomcat=$(/opt/tomcat/bin/version.sh 2>/dev/null \
-            | grep "Server version" \
-            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
-            | head -1)
-        if systemctl is-active --quiet tomcat 2>/dev/null; then
-            local puerto_tomcat
-            puerto_tomcat=$(ss -tulnp | grep java | grep '\*:' | grep -oP '\*:\K[0-9]+' | head -1)
-            echo -e "${verde}Instalado y activo${nc} -- version: ${ver_tomcat:-?} -- puerto: ${puerto_tomcat:-?}"
-        else
-            echo -e "${amarillo}Instalado pero detenido${nc} -- version: ${ver_tomcat:-?}"
-        fi
-    else
-        echo -e "${rojo}No instalado${nc}"
-    fi
+    Write-Host -NoNewline "  Nginx   : "
+    $nginx = Get-Service -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^nginx" } | Select-Object -First 1
+    if ($nginx) {
+        $nginxRoot = Obtener-Ruta-Nginx
+        $puerto = if ($nginxRoot -and (Test-Path "$nginxRoot\conf\nginx.conf")) {
+            Get-Content "$nginxRoot\conf\nginx.conf" |
+                Select-String 'listen\s+(\d+)' |
+                ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
+        } else { "?" }
+        if ($nginx.Status -eq "Running") {
+            Write-Host "Activo -- puerto: $puerto (servicio: $($nginx.Name))" -ForegroundColor Green
+        } else { Write-Host "Detenido -- puerto: $puerto" -ForegroundColor Yellow }
+    } else { Write-Host "No instalado" -ForegroundColor Red }
 
-    echo ""
+    Write-Host ""
 }
 
-# =============== REVISAR CURL ===============
-revisar_HTTP() {
-    clear
-    echo ""
-    echo -e "${azul}=== Revision de Servidores HTTP ===${nc}"
-    echo ""
-    echo -e "  ${amarillo}[1]${nc} Apache2"
-    echo -e "  ${amarillo}[2]${nc} Nginx"
-    echo -e "  ${amarillo}[3]${nc} Apache Tomcat"
-    echo -e "  ${amarillo}[4]${nc} Todos"
-    echo ""
+# =============== REVISAR HTTP ===============
+function RevisarHTTP {
+    Clear-Host
+    Write-Host ""
+    Write-Host "=== Revision de Servidores HTTP ===" -ForegroundColor Blue
+    Write-Host ""
+    Write-Host "  [1] IIS"
+    Write-Host "  [2] Apache2"
+    Write-Host "  [3] Nginx"
+    Write-Host "  [4] Todos"
+    Write-Host ""
+    $opcion = Read-Host "Selecciona [1-4]"
+    if ($opcion -notmatch '^[1234]$') { Write-Warn "Opcion invalida."; return }
 
-    local opcion
-    while true; do
-        echo -en "${cyan}Selecciona [1-4]: ${nc}"
-        read -r opcion
-        opcion="${opcion//[^0-9]/}"
-        [[ "$opcion" =~ ^[1234]$ ]] && break
-        print_error "Opcion invalida"
-    done
-
-    echo ""
-
-    _curl_apache() {
-        local puerto
-        puerto=$(ss -tulnp | grep -E 'httpd|apache2' | grep -oP ':\K[0-9]+' | head -1)
-        puerto="${puerto:-80}"
-        echo -e "${azul}--- Apache2 (puerto $puerto) ---${nc}"
-        echo -e "${amarillo}Headers:${nc}"
-        curl -sI http://localhost:"$puerto"
-        echo -e "${amarillo}Index:${nc}"
-        curl -s http://localhost:"$puerto"
-        echo ""
+    function Curl-Servidor {
+        param([string]$nombre, [int]$puerto)
+        Write-Host ""
+        Write-Host "--- $nombre (puerto $puerto) ---" -ForegroundColor Blue
+        Write-Host "Headers:" -ForegroundColor Cyan
+        try {
+            $resp = Invoke-WebRequest -Uri "http://localhost:$puerto" -Method Head -UseBasicParsing -ErrorAction Stop
+            $resp.Headers.GetEnumerator() | ForEach-Object { Write-Host "  $($_.Key): $($_.Value)" }
+        } catch { Write-Err "Sin respuesta en puerto $puerto" }
+        Write-Host "Index:" -ForegroundColor Cyan
+        try {
+            $resp = Invoke-WebRequest -Uri "http://localhost:$puerto" -UseBasicParsing -ErrorAction Stop
+            Write-Host $resp.Content
+        } catch { Write-Err "No se pudo obtener index de puerto $puerto" }
     }
 
-    _curl_nginx() {
-        local puerto
-        puerto=$(ss -tulnp | grep nginx | grep -oP ':\K[0-9]+' | head -1)
-        puerto="${puerto:-8080}"
-        echo -e "${azul}--- Nginx (puerto $puerto) ---${nc}"
-        echo -e "${amarillo}Headers:${nc}"
-        curl -sI http://localhost:"$puerto"
-        echo -e "${amarillo}Index:${nc}"
-        curl -s http://localhost:"$puerto"
-        echo ""
-    }
+    $appcmd = "$env:SystemRoot\system32\inetsrv\appcmd.exe"
+    $puertoIIS = if (Test-Path $appcmd) {
+        & $appcmd list site "Default Web Site" 2>$null |
+            Select-String ':(\d+):' | ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
+    } else { 80 }
 
-    _curl_tomcat() {
-        local puerto
-        puerto=$(ss -tulnp | grep java | grep '\*:' | grep -oP '\*:\K[0-9]+' | head -1)
-        puerto="${puerto:-8888}"
-        echo -e "${azul}--- Apache Tomcat (puerto $puerto) ---${nc}"
-        echo -e "${amarillo}Headers:${nc}"
-        curl -sI http://localhost:"$puerto"
-        echo -e "${amarillo}Index:${nc}"
-        curl -s http://localhost:"$puerto"
-        echo ""
-    }
+    $apacheRoot   = @("C:\Apache24","$env:APPDATA\Apache24") |
+        Where-Object { Test-Path "$_\conf\httpd.conf" } | Select-Object -First 1
+    $puertoApache = if ($apacheRoot) {
+        Get-Content "$apacheRoot\conf\httpd.conf" |
+            Select-String '^Listen\s+(\d+)' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
+    } else { 80 }
 
-    case $opcion in
-        1) _curl_apache ;;
-        2) _curl_nginx  ;;
-        3) _curl_tomcat ;;
-        4) _curl_apache; _curl_nginx; _curl_tomcat ;;
-    esac
+    $nginxRoot    = Obtener-Ruta-Nginx
+    $puertoNginx  = if ($nginxRoot -and (Test-Path "$nginxRoot\conf\nginx.conf")) {
+        Get-Content "$nginxRoot\conf\nginx.conf" |
+            Select-String 'listen\s+(\d+)' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value } | Select-Object -First 1
+    } else { 80 }
+
+    switch ($opcion) {
+        "1" { Curl-Servidor "IIS"    ([int]$puertoIIS)    }
+        "2" { Curl-Servidor "Apache" ([int]$puertoApache) }
+        "3" { Curl-Servidor "Nginx"  ([int]$puertoNginx)  }
+        "4" {
+            Curl-Servidor "IIS"    ([int]$puertoIIS)
+            Curl-Servidor "Apache" ([int]$puertoApache)
+            Curl-Servidor "Nginx"  ([int]$puertoNginx)
+        }
+    }
 }
