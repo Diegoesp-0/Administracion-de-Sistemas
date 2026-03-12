@@ -33,36 +33,64 @@ habilitar_puerto_selinux() {
 # =============== OBTENER VERSIONES ===============
 obtener_versiones_zypper() {
     local paquete="$1"
+    local versiones=()
 
-    zypper --quiet se --match-exact --details "$paquete" 2>/dev/null \
-        | awk -F'|' 'NF>=4 && $4~/[0-9]/ {gsub(/ /,"",$4); print $4}' \
-        | grep -v "^$" \
-        | sort -uV
+    # Metodo 1: rpm -q (instantaneo, si ya esta instalado)
+    local ver_instalada
+    ver_instalada=$(rpm -q "$paquete" --queryformat '%{VERSION}' 2>/dev/null)
+    if [[ -n "$ver_instalada" ]]; then
+        versiones+=("$ver_instalada")
+    fi
+
+    # Metodo 2: zypper info (rapido, no hace search completo)
+    local ver_repo
+    ver_repo=$(timeout 8 zypper --quiet --no-refresh info "$paquete" 2>/dev/null         | grep -i "^Version"         | awk '{print $NF}'         | grep -oP '^[0-9]+\.[0-9]+[^ ]*'         | head -1)
+
+    if [[ -n "$ver_repo" ]] && [[ "$ver_repo" != "$ver_instalada" ]]; then
+        versiones+=("$ver_repo")
+    fi
+
+    # Si no se obtuvo nada con zypper info, intentar search con timeout corto
+    if [[ ${#versiones[@]} -eq 0 ]]; then
+        mapfile -t versiones < <(
+            timeout 8 zypper --quiet --no-refresh se --match-exact --details "$paquete"                 -r openSUSE:repo-oss 2>/dev/null             | awk -F'|' 'NF>=4 && $4~/[0-9]/ {gsub(/ /,"",$4); print $4}'             | grep -v "^$"             | sort -uV
+        )
+    fi
+
+    # Fallback hardcoded si todo falla
+    if [[ ${#versiones[@]} -eq 0 ]]; then
+        case "$paquete" in
+            apache2) versiones=("2.4.63") ;;
+            nginx)   versiones=("1.26.2") ;;
+        esac
+        print_info "Usando version de referencia: ${versiones[*]}" >&2
+    fi
+
+    printf '%s
+' "${versiones[@]}" | sort -uV
 }
 
 obtener_versiones_tomcat() {
     local base_url="https://dlcdn.apache.org/tomcat/"
+
+    print_info "Consultando versiones de Tomcat..." >&2
+
+    # Una sola peticion: obtener todas las ramas disponibles
     local ramas
-
-    print_info "Consultando versiones en dlcdn.apache.org..." >&2
-
-    ramas=$(curl -s --max-time 8 "$base_url" 2>/dev/null \
-        | grep -oP 'tomcat-\K[0-9]+(?=/)' \
-        | sort -uV)
+    ramas=$(timeout 8 curl -s "$base_url" 2>/dev/null         | grep -oP 'tomcat-\K[0-9]+(?=/)'         | sort -uV)
 
     if [[ -z "$ramas" ]]; then
-        print_info "Sin acceso a internet. Usando versiones de referencia." >&2
+        print_info "Sin acceso. Usando versiones de referencia." >&2
         echo "9.0.102"
         echo "10.1.40"
         echo "11.0.7"
         return
     fi
 
+    # Una peticion por rama en paralelo con timeout corto
     while IFS= read -r rama; do
         local latest
-        latest=$(curl -s --max-time 8 "${base_url}tomcat-${rama}/" 2>/dev/null \
-            | grep -oP "v\K[0-9]+\.[0-9]+\.[0-9]+" \
-            | sort -V | tail -1)
+        latest=$(timeout 5 curl -s "${base_url}tomcat-${rama}/" 2>/dev/null             | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+'             | sort -V | tail -1)
         [[ -n "$latest" ]] && echo "$latest"
     done <<< "$ramas"
 }
@@ -367,11 +395,13 @@ instalar_tomcat() {
 
     if ! command -v java &>/dev/null; then
         print_info "Java no encontrado. Instalando OpenJDK 21..."
-        if ! zypper --non-interactive install java-21-openjdk java-21-openjdk-headless &>/dev/null; then
+        print_info "Esto puede tardar varios minutos, por favor espera..."
+        zypper --non-interactive -y install java-21-openjdk java-21-openjdk-headless 2>&1             | grep -E "Installing|Downloading|Error|error|WARNING"
+        if ! command -v java &>/dev/null; then
             print_error "No se pudo instalar Java."
             return 1
         fi
-        print_completado "Java instalado."
+        print_completado "Java instalado: $(java -version 2>&1 | head -1)"
     else
         print_completado "Java: $(java -version 2>&1 | head -1)"
     fi
@@ -527,6 +557,10 @@ instalar_HTTP() {
         1)
             print_info "Consultando versiones de Apache2..."
             mapfile -t versiones < <(obtener_versiones_zypper "apache2")
+            if [[ ${#versiones[@]} -eq 0 ]]; then
+                print_info "Usando versiones de referencia..."
+                versiones=("2.4.58" "2.4.59" "2.4.62")
+            fi
             elegir_version "Apache2" "${versiones[@]}" || return 1
             pedir_puerto
             instalar_apache
@@ -534,6 +568,10 @@ instalar_HTTP() {
         2)
             print_info "Consultando versiones de Nginx..."
             mapfile -t versiones < <(obtener_versiones_zypper "nginx")
+            if [[ ${#versiones[@]} -eq 0 ]]; then
+                print_info "Usando versiones de referencia..."
+                versiones=("1.21.5" "1.24.0" "1.25.3")
+            fi
             elegir_version "Nginx" "${versiones[@]}" || return 1
             pedir_puerto
             instalar_nginx
