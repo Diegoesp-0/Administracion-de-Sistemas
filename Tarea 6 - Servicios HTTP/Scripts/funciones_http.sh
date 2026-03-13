@@ -33,21 +33,48 @@ habilitar_puerto_selinux() {
 # =============== OBTENER VERSIONES ===============
 obtener_versiones_zypper() {
     local paquete="$1"
+    local versiones=()
 
-    zypper --quiet se --match-exact --details "$paquete" 2>/dev/null \
-        | awk -F'|' 'NF>=4 && $4~/[0-9]/ {gsub(/ /,"",$4); print $4}' \
-        | grep -v "^$" \
-        | sort -uV
+    # Metodo 1: rpm -q solo si ya esta instalado (evita mensaje de error)
+    if rpm -q "$paquete" &>/dev/null; then
+        local ver_instalada
+        ver_instalada=$(rpm -q "$paquete" --queryformat '%{VERSION}' 2>/dev/null)
+        [[ -n "$ver_instalada" ]] && versiones+=("$ver_instalada")
+    fi
+
+    # Metodo 2: zypper info (rapido, no hace search completo)
+    local ver_repo
+    ver_repo=$(timeout 15 zypper --quiet info "$paquete" 2>/dev/null \
+        | grep -i "^Version" \
+        | awk '{print $NF}' \
+        | grep -oE '^[0-9]+\.[0-9]+[^ ]*' \
+        | head -1)
+
+    if [[ -n "$ver_repo" && "$ver_repo" != "${versiones[0]:-}" ]]; then
+        versiones+=("$ver_repo")
+    fi
+
+    # Fallback si todo falla
+    if [[ ${#versiones[@]} -eq 0 ]]; then
+        case "$paquete" in
+            apache2) versiones=("2.4.63") ;;
+            nginx)   versiones=("1.26.2") ;;
+        esac
+        print_info "Usando version de referencia: ${versiones[*]}" >&2
+    fi
+
+    printf '%s\n' "${versiones[@]}"
 }
 
 obtener_versiones_tomcat() {
     local base_url="https://dlcdn.apache.org/tomcat/"
+
+    print_info "Consultando versiones de Tomcat..." >&2
+
     local ramas
-
-    print_info "Consultando versiones en dlcdn.apache.org..." >&2
-
-    ramas=$(curl -s --max-time 8 "$base_url" 2>/dev/null \
-        | grep -oP 'tomcat-\K[0-9]+(?=/)' \
+    ramas=$(timeout 8 curl -s "$base_url" 2>/dev/null \
+        | grep -oE 'tomcat-[0-9]+/' \
+        | grep -oE '[0-9]+' \
         | sort -uV)
 
     if [[ -z "$ramas" ]]; then
@@ -60,8 +87,9 @@ obtener_versiones_tomcat() {
 
     while IFS= read -r rama; do
         local latest
-        latest=$(curl -s --max-time 8 "${base_url}tomcat-${rama}/" 2>/dev/null \
-            | grep -oP "v\K[0-9]+\.[0-9]+\.[0-9]+" \
+        latest=$(timeout 5 curl -s "${base_url}tomcat-${rama}/" 2>/dev/null \
+            | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+/' \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
             | sort -V | tail -1)
         [[ -n "$latest" ]] && echo "$latest"
     done <<< "$ramas"
@@ -153,6 +181,11 @@ instalar_apache() {
     fi
     print_completado "Apache2 instalado."
 
+    # Leer version real ahora que ya esta instalado
+    local ver_real
+    ver_real=$(rpm -q apache2 --queryformat '%{VERSION}' 2>/dev/null)
+    [[ -n "$ver_real" ]] && VERSION_ELEGIDA="$ver_real"
+
     local listen_conf="/etc/apache2/listen.conf"
     cp "$listen_conf" "${listen_conf}.bak" 2>/dev/null
     sed -i "s/^Listen 80$/Listen ${PUERTO_ELEGIDO}/" "$listen_conf"
@@ -242,6 +275,11 @@ instalar_nginx() {
         return 1
     fi
     print_completado "Nginx instalado."
+
+    # Leer version real ahora que ya esta instalado
+    local ver_real
+    ver_real=$(rpm -q nginx --queryformat '%{VERSION}' 2>/dev/null)
+    [[ -n "$ver_real" ]] && VERSION_ELEGIDA="$ver_real"
 
     if ! id "www-nginx" &>/dev/null; then
         useradd -r -s /sbin/nologin -d "$NGINX_WEBROOT" -M www-nginx
@@ -367,11 +405,15 @@ instalar_tomcat() {
 
     if ! command -v java &>/dev/null; then
         print_info "Java no encontrado. Instalando OpenJDK 21..."
-        if ! zypper --non-interactive install java-21-openjdk java-21-openjdk-headless &>/dev/null; then
+        print_info "Esto puede tardar varios minutos, por favor espera..."
+        zypper --non-interactive install java-21-openjdk java-21-openjdk-headless 2>&1 \
+            | grep -E "^Instalando|^Installing|^Descargando|^Downloading|[Ee]rror"
+        if ! command -v java &>/dev/null; then
             print_error "No se pudo instalar Java."
+            print_info  "Intenta manualmente: zypper install java-21-openjdk"
             return 1
         fi
-        print_completado "Java instalado."
+        print_completado "Java instalado: $(java -version 2>&1 | head -1)"
     else
         print_completado "Java: $(java -version 2>&1 | head -1)"
     fi
@@ -394,9 +436,30 @@ instalar_tomcat() {
     print_completado "Tomcat extraido en /opt/tomcat"
 
     cp /opt/tomcat/conf/server.xml /opt/tomcat/conf/server.xml.bak
-    sed -i "s/port=\"8080\"/port=\"${PUERTO_ELEGIDO}\"/" /opt/tomcat/conf/server.xml
-    sed -i 's/port="8009"/port="-1"/' /opt/tomcat/conf/server.xml
-    print_completado "Puerto configurado en server.xml -> $PUERTO_ELEGIDO"
+
+    # Usar xmllint o sed robusto para cambiar el puerto del conector HTTP
+    # El conector HTTP/1.1 puede tener cualquier puerto (no siempre 8080)
+    if command -v python3 &>/dev/null; then
+        python3 -c "
+import re
+with open('/opt/tomcat/conf/server.xml', 'r') as f:
+    xml = f.read()
+xml = re.sub(
+    r'(<Connector\s+port=\")[^\"]+(\"[^>]*protocol=\"HTTP/1\.1\")',
+    r'\\g<1>${PUERTO_ELEGIDO}\\g<2>',
+    xml, count=1
+)
+xml = re.sub(r'port=\"8009\"', 'port=\"-1\"', xml)
+with open('/opt/tomcat/conf/server.xml', 'w') as f:
+    f.write(xml)
+" 2>/dev/null && print_completado "Puerto configurado via python3 -> $PUERTO_ELEGIDO"
+    else
+        # Fallback: sed busca cualquier puerto en el conector HTTP
+        sed -i -E 's/(Connector port=")[0-9]+"([^>]*protocol="HTTP\/1\.1")/\1'${PUERTO_ELEGIDO}'"\2/' \
+            /opt/tomcat/conf/server.xml
+        sed -i 's/port="8009"/port="-1"/' /opt/tomcat/conf/server.xml
+        print_completado "Puerto configurado via sed -> $PUERTO_ELEGIDO"
+    fi
     print_completado "Conector AJP deshabilitado."
 
     sed -i 's|</web-app>||' /opt/tomcat/conf/web.xml
@@ -557,13 +620,13 @@ verificar_HTTP() {
     echo -en "  ${amarillo}Apache2  :${nc} "
     if rpm -q apache2 &>/dev/null; then
         local ver_apache
-        ver_apache=$(rpm -q apache2 --queryformat '%{VERSION}')
+        ver_apache=$(rpm -q apache2 --queryformat '%{VERSION}' 2>/dev/null)
         if systemctl is-active --quiet apache2; then
             local puerto_apache
             puerto_apache=$(ss -tulnp | grep -E 'httpd|apache2' | grep -oP ':\K[0-9]+' | head -1)
-            echo -e "${verde}Instalado y activo${nc} — version: $ver_apache — puerto: ${puerto_apache:-?}"
+            echo -e "${verde}Instalado y activo${nc} -- version: $ver_apache -- puerto: ${puerto_apache:-?}"
         else
-            echo -e "${amarillo}Instalado pero detenido${nc} — version: $ver_apache"
+            echo -e "${amarillo}Instalado pero detenido${nc} -- version: $ver_apache"
         fi
     else
         echo -e "${rojo}No instalado${nc}"
@@ -572,13 +635,13 @@ verificar_HTTP() {
     echo -en "  ${amarillo}Nginx    :${nc} "
     if rpm -q nginx &>/dev/null; then
         local ver_nginx
-        ver_nginx=$(rpm -q nginx --queryformat '%{VERSION}')
+        ver_nginx=$(rpm -q nginx --queryformat '%{VERSION}' 2>/dev/null)
         if systemctl is-active --quiet nginx; then
             local puerto_nginx
             puerto_nginx=$(ss -tulnp | grep nginx | grep -oP ':\K[0-9]+' | head -1)
-            echo -e "${verde}Instalado y activo${nc} — version: $ver_nginx — puerto: ${puerto_nginx:-?}"
+            echo -e "${verde}Instalado y activo${nc} -- version: $ver_nginx -- puerto: ${puerto_nginx:-?}"
         else
-            echo -e "${amarillo}Instalado pero detenido${nc} — version: $ver_nginx"
+            echo -e "${amarillo}Instalado pero detenido${nc} -- version: $ver_nginx"
         fi
     else
         echo -e "${rojo}No instalado${nc}"
@@ -587,13 +650,16 @@ verificar_HTTP() {
     echo -en "  ${amarillo}Tomcat   :${nc} "
     if [[ -f /opt/tomcat/bin/startup.sh ]]; then
         local ver_tomcat
-        ver_tomcat=$(/opt/tomcat/bin/version.sh 2>/dev/null | grep "Server version" | grep -oP 'Tomcat/\K[0-9]+\.[0-9]+\.[0-9]+')
+        ver_tomcat=$(/opt/tomcat/bin/version.sh 2>/dev/null \
+            | grep "Server version" \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
+            | head -1)
         if systemctl is-active --quiet tomcat 2>/dev/null; then
             local puerto_tomcat
             puerto_tomcat=$(ss -tulnp | grep java | grep '\*:' | grep -oP '\*:\K[0-9]+' | head -1)
-            echo -e "${verde}Instalado y activo${nc} — version: ${ver_tomcat:-?} — puerto: ${puerto_tomcat:-?}"
+            echo -e "${verde}Instalado y activo${nc} -- version: ${ver_tomcat:-?} -- puerto: ${puerto_tomcat:-?}"
         else
-            echo -e "${amarillo}Instalado pero detenido${nc} — version: ${ver_tomcat:-?}"
+            echo -e "${amarillo}Instalado pero detenido${nc} -- version: ${ver_tomcat:-?}"
         fi
     else
         echo -e "${rojo}No instalado${nc}"
@@ -663,7 +729,7 @@ revisar_HTTP() {
 
     case $opcion in
         1) _curl_apache ;;
-        2) _curl_nginx ;;
+        2) _curl_nginx  ;;
         3) _curl_tomcat ;;
         4) _curl_apache; _curl_nginx; _curl_tomcat ;;
     esac
