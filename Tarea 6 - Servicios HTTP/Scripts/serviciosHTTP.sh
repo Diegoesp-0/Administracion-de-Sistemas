@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUTA="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$RUTA/../../Funciones/Linux/colores.sh"
 source "$RUTA/../../Funciones/Linux/validaciones.sh"
 source "$RUTA/funciones_http.sh"
