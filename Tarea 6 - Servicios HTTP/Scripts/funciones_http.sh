@@ -436,9 +436,30 @@ instalar_tomcat() {
     print_completado "Tomcat extraido en /opt/tomcat"
 
     cp /opt/tomcat/conf/server.xml /opt/tomcat/conf/server.xml.bak
-    sed -i "s/port=\"8080\"/port=\"${PUERTO_ELEGIDO}\"/" /opt/tomcat/conf/server.xml
-    sed -i 's/port="8009"/port="-1"/' /opt/tomcat/conf/server.xml
-    print_completado "Puerto configurado en server.xml -> $PUERTO_ELEGIDO"
+
+    # Usar xmllint o sed robusto para cambiar el puerto del conector HTTP
+    # El conector HTTP/1.1 puede tener cualquier puerto (no siempre 8080)
+    if command -v python3 &>/dev/null; then
+        python3 -c "
+import re
+with open('/opt/tomcat/conf/server.xml', 'r') as f:
+    xml = f.read()
+xml = re.sub(
+    r'(<Connector\s+port=\")[^\"]+(\"[^>]*protocol=\"HTTP/1\.1\")',
+    r'\\g<1>${PUERTO_ELEGIDO}\\g<2>',
+    xml, count=1
+)
+xml = re.sub(r'port=\"8009\"', 'port=\"-1\"', xml)
+with open('/opt/tomcat/conf/server.xml', 'w') as f:
+    f.write(xml)
+" 2>/dev/null && print_completado "Puerto configurado via python3 -> $PUERTO_ELEGIDO"
+    else
+        # Fallback: sed busca cualquier puerto en el conector HTTP
+        sed -i -E 's/(Connector port=")[0-9]+"([^>]*protocol="HTTP\/1\.1")/\1'${PUERTO_ELEGIDO}'"\2/' \
+            /opt/tomcat/conf/server.xml
+        sed -i 's/port="8009"/port="-1"/' /opt/tomcat/conf/server.xml
+        print_completado "Puerto configurado via sed -> $PUERTO_ELEGIDO"
+    fi
     print_completado "Conector AJP deshabilitado."
 
     sed -i 's|</web-app>||' /opt/tomcat/conf/web.xml
