@@ -43,14 +43,12 @@ obtener_versiones_zypper() {
 obtener_versiones_tomcat() {
     print_info "Consultando versiones disponibles de Tomcat..." >&2
 
-    # Solo versiones modernas y soportadas (9, 10, 11)
     local ramas_soportadas=(9 10 11)
     local versiones=()
 
     for rama in "${ramas_soportadas[@]}"; do
         local base_url="https://archive.apache.org/dist/tomcat/tomcat-${rama}/"
 
-        # Obtener la última versión de esta rama
         local latest
         latest=$(curl -k -s --max-time 8 "$base_url" 2>/dev/null \
             | grep -oP "v\K[0-9]+\.[0-9]+\.[0-9]+" \
@@ -61,7 +59,6 @@ obtener_versiones_tomcat() {
         fi
     done
 
-    # Si no se pudieron obtener versiones online, usar versiones de referencia
     if [[ ${#versiones[@]} -eq 0 ]]; then
         print_info "Sin acceso a internet. Usando versiones de referencia." >&2
         echo "9.0.102"
@@ -70,7 +67,6 @@ obtener_versiones_tomcat() {
         return
     fi
 
-    # Mostrar versiones ordenadas
     printf '%s\n' "${versiones[@]}" | sort -V
 }
 
@@ -162,7 +158,10 @@ instalar_apache() {
 
     local listen_conf="/etc/apache2/listen.conf"
     cp "$listen_conf" "${listen_conf}.bak" 2>/dev/null
-    sed -i "s/^Listen 80$/Listen ${PUERTO_ELEGIDO}/" "$listen_conf"
+
+    # Eliminar cualquier directiva Listen numerica activa y poner la correcta
+    sed -i '/^Listen [0-9]/d' "$listen_conf"
+    echo "Listen ${PUERTO_ELEGIDO}" >> "$listen_conf"
     print_completado "Puerto configurado -> Listen $PUERTO_ELEGIDO"
 
     cat > /etc/apache2/vhosts.d/tarea6.conf << EOF
@@ -371,7 +370,6 @@ instalar_tomcat() {
     local rama="${VERSION_ELEGIDA%%.*}"
     local tarball="/tmp/apache-tomcat-${VERSION_ELEGIDA}.tar.gz"
 
-    # Lista de URLs a intentar (en orden de prioridad)
     local urls=(
         "https://archive.apache.org/dist/tomcat/tomcat-${rama}/v${VERSION_ELEGIDA}/bin/apache-tomcat-${VERSION_ELEGIDA}.tar.gz"
         "https://dlcdn.apache.org/tomcat/tomcat-${rama}/v${VERSION_ELEGIDA}/bin/apache-tomcat-${VERSION_ELEGIDA}.tar.gz"
@@ -395,7 +393,6 @@ instalar_tomcat() {
     for url in "${urls[@]}"; do
         print_info "Intentando: $url"
         if curl -k -f -L --connect-timeout 10 --max-time 120 --progress-bar -o "$tarball" "$url" 2>&1; then
-            # Verificar que el archivo descargado es realmente un tar.gz
             if file "$tarball" | grep -q "gzip compressed"; then
                 descarga_exitosa=true
                 print_completado "Descarga exitosa desde: $url"
@@ -426,35 +423,16 @@ instalar_tomcat() {
     rm -f "$tarball"
     print_completado "Tomcat extraido en /opt/tomcat"
 
-    # FIX 1: Usar python3 para editar server.xml de forma robusta y agregar address="0.0.0.0"
-    # El sed simple solo cambiaba la primera ocurrencia y no agregaba address,
-    # lo que causaba que Tomcat escuchara solo en localhost y fuera inaccesible desde la red.
     cp /opt/tomcat/conf/server.xml /opt/tomcat/conf/server.xml.bak
-    python3 - << PYEOF
-import re
 
-with open('/opt/tomcat/conf/server.xml', 'r') as f:
-    xml = f.read()
+    # Cambiar puerto 8080 -> elegido y agregar address="0.0.0.0" para escuchar en todas las interfaces.
+    # Se reemplaza la linea exacta del conector HTTP que trae Tomcat por defecto.
+    sed -i "s|port=\"8080\" protocol=\"HTTP/1.1\"|port=\"${PUERTO_ELEGIDO}\" address=\"0.0.0.0\" protocol=\"HTTP/1.1\"|g" \
+        /opt/tomcat/conf/server.xml
 
-# Cambiar puerto HTTP 8080 -> elegido y agregar address="0.0.0.0" para escuchar en todas las interfaces
-xml = re.sub(
-    r'(<Connector\b[^>]*?\bport=")8080(")',
-    r'\g<1>${PUERTO_ELEGIDO}\2',
-    xml
-)
-# Insertar address="0.0.0.0" en el conector HTTP si no existe ya
-xml = re.sub(
-    r'(<Connector\b[^>]*?\bport="${PUERTO_ELEGIDO}"(?![^>]*address=)[^>]*?)(/>|>)',
-    r'\1 address="0.0.0.0"\2',
-    xml
-)
+    # Deshabilitar conector AJP
+    sed -i 's|port="8009"|port="-1"|g' /opt/tomcat/conf/server.xml
 
-# Deshabilitar AJP (8009 -> -1)
-xml = re.sub(r'port="8009"', 'port="-1"', xml)
-
-with open('/opt/tomcat/conf/server.xml', 'w') as f:
-    f.write(xml)
-PYEOF
     print_completado "Puerto configurado en server.xml -> $PUERTO_ELEGIDO (escuchando en 0.0.0.0)"
     print_completado "Conector AJP deshabilitado."
 
@@ -542,12 +520,12 @@ SVCEOF
         print_completado "Firewall: puerto $PUERTO_ELEGIDO abierto."
     fi
 
-    # FIX 2: Habilitar binding de puertos privilegiados (<1024) para el usuario tomcat (no-root).
-    # Sin esto, el servicio falla silenciosamente al intentar bindear el puerto 80 u otro < 1024.
+    # Habilitar binding de puertos privilegiados (<1024) para el usuario tomcat (no-root).
+    # Sin esto, tomcat arranca pero no logra bindear el puerto y no responde en red.
     if [[ "$PUERTO_ELEGIDO" -lt 1024 ]]; then
         print_info "Puerto $PUERTO_ELEGIDO < 1024: configurando permisos para usuario tomcat..."
 
-        # Metodo 1: bajar el limite de puertos no privilegiados via sysctl (persistente)
+        # Metodo 1: bajar el limite via sysctl (persistente entre reinicios)
         if sysctl -w net.ipv4.ip_unprivileged_port_start="${PUERTO_ELEGIDO}" &>/dev/null; then
             sed -i '/net.ipv4.ip_unprivileged_port_start/d' /etc/sysctl.conf
             echo "net.ipv4.ip_unprivileged_port_start=${PUERTO_ELEGIDO}" >> /etc/sysctl.conf
@@ -568,13 +546,21 @@ SVCEOF
     systemctl enable tomcat &>/dev/null
     systemctl start tomcat &>/dev/null
     print_info "Esperando que Tomcat inicie..."
-    sleep 10
+    sleep 12
 
     if systemctl is-active --quiet tomcat; then
-        local ip
-        ip=$(ip addr show "$INTERFAZ_RED" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
-        print_completado "Tomcat activo en puerto $PUERTO_ELEGIDO"
-        print_info "Prueba: curl -I http://${ip}:${PUERTO_ELEGIDO}"
+        # Verificar que realmente esta bindeado al puerto (no solo que el proceso existe)
+        local bind_check
+        bind_check=$(ss -tulnp | grep java | grep -oP '(?:[\d.]+|::):\K[0-9]+' | grep -v '^0$' | head -1)
+        if [[ -n "$bind_check" ]]; then
+            local ip
+            ip=$(ip addr show "$INTERFAZ_RED" 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+            print_completado "Tomcat activo y bindeado en puerto $bind_check"
+            print_info "Prueba: curl -I http://${ip}:${bind_check}"
+        else
+            print_error "Tomcat esta activo pero no bindeo el puerto $PUERTO_ELEGIDO."
+            print_info  "Revisa: cat /opt/tomcat/logs/catalina.out | tail -30"
+        fi
     else
         print_error "Tomcat no arranco."
         print_info  "Revisa: journalctl -u tomcat -n 20"
@@ -671,7 +657,6 @@ verificar_HTTP() {
         local ver_tomcat
         ver_tomcat=$(/opt/tomcat/bin/version.sh 2>/dev/null | grep "Server version" | grep -oP 'Tomcat/\K[0-9]+\.[0-9]+\.[0-9]+')
         if systemctl is-active --quiet tomcat 2>/dev/null; then
-            # FIX 3: grep mas amplio para capturar 0.0.0.0:PUERTO y :::PUERTO ademas de *:PUERTO
             local puerto_tomcat
             puerto_tomcat=$(ss -tulnp | grep java | grep -oP '(?:[\d.]+|::):\K[0-9]+' | grep -v '^0$' | head -1)
             echo -e "${verde}Instalado y activo${nc} — version: ${ver_tomcat:-?} — puerto: ${puerto_tomcat:-?}"
@@ -733,7 +718,6 @@ revisar_HTTP() {
     }
 
     _curl_tomcat() {
-        # FIX 4: mismo grep amplio que en verificar_HTTP para detectar el puerto correctamente
         local puerto
         puerto=$(ss -tulnp | grep java | grep -oP '(?:[\d.]+|::):\K[0-9]+' | grep -v '^0$' | head -1)
         puerto="${puerto:-8888}"
