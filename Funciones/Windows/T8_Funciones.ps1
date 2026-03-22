@@ -1,679 +1,464 @@
-# =============================================
-#  T8_Funciones.ps1
-#  Tarea 8 - Gobernanza, Cuotas y Control
-#  Windows Server 2022 Core
-# =============================================
+# VARIABLES GLOBALES
+$script:DOMINIO       = "empresa.local"
+$script:DC_PATH       = "DC=empresa,DC=local"
+$script:RUTA_PERFILES = "C:\Perfiles"
+$script:SHARE_NAME    = "HomeUsers"
+$script:UTC_OFFSET    = -7
 
-#  VARIABLES GLOBALES
-$global:DOMINIO        = ""
-$global:NETBIOS        = ""
-$global:PASSWORD_ADMIN = "Milaneza12345@"
-$global:RUTA_CSV       = "$PSScriptRoot\..\..\Tarea 8 - Gobernanza, Cuotas y Control de Aplicaciones en Active Directory\Scripts\usuarios.csv"
-$global:RUTA_CARPETAS  = "C:\Usuarios"
-$global:IP_SERVIDOR    = ""
+function Print-Ok   { param($msg) Write-Host "[OK]   $msg" -ForegroundColor Green  }
+function Print-Info { param($msg) Write-Host "[INFO] $msg" -ForegroundColor Cyan   }
+function Print-Warn { param($msg) Write-Host "[WARN] $msg" -ForegroundColor Yellow }
+function Print-Err  { param($msg) Write-Host "[ERR]  $msg" -ForegroundColor Red    }
 
-#  UTILIDADES
+function inicializarEntorno {
+    Print-Info "Instalando roles: AD DS, FSRM, GPMC..."
 
-function Escribir-Ok {
-    param($msg)
-    Write-Host "[OK] $msg" -ForegroundColor Green
+    Install-WindowsFeature AD-Domain-Services, FS-Resource-Manager, GPMC `
+        -IncludeManagementTools -ErrorAction Stop
+
+    Print-Ok "Roles instalados."
+    Print-Info "Promoviendo servidor a Controlador de Dominio..."
+
+    $safePwd = ConvertTo-SecureString "SafeModeP@ss123!" -AsPlainText -Force
+
+    Install-ADDSForest `
+        -DomainName                    $script:DOMINIO `
+        -DomainNetBiosName             "EMPRESA" `
+        -InstallDns `
+        -SafeModeAdministratorPassword $safePwd `
+        -Force
+
+    Print-Warn "El servidor se reiniciara. Ejecuta el script de nuevo despues."
 }
 
-function Escribir-Info {
-    param($msg)
-    Write-Host "[INFO] $msg" -ForegroundColor Cyan
-}
+function crearEstructuraAD {
 
-function Escribir-Error {
-    param($msg)
-    Write-Host "[ERROR] $msg" -ForegroundColor Red
-}
-
-function Escribir-Titulo {
-    param($msg)
-    Write-Host ""
-    Write-Host "===== $msg =====" -ForegroundColor Yellow
-    Write-Host ""
-}
-
-function Pausar {
-    Write-Host ""
-    Read-Host "Presiona Enter para continuar"
-}
-
-function Verificar-Admin {
-    $esAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if (-not $esAdmin) {
-        Escribir-Error "Ejecutar como Administrador"
-        exit 1
+    if (-not (Test-Path $script:RUTA_PERFILES)) {
+        New-Item -Path $script:RUTA_PERFILES -ItemType Directory -Force | Out-Null
+        Print-Ok "Carpeta creada: $($script:RUTA_PERFILES)"
     }
-}
 
-function Obtener-IP {
-    $ip = (Get-NetIPAddress -AddressFamily IPv4 |
-        Where-Object { $_.IPAddress -notmatch "^127\." -and $_.PrefixOrigin -ne "WellKnown" } |
-        Select-Object -First 1).IPAddress
-    $global:IP_SERVIDOR = $ip
-    return $ip
-}
-
-function Validar-Dominio {
-    param([string]$dominio)
-    if ($dominio -match '^[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$') {
-        return $true
-    }
-    Escribir-Error "Formato invalido, tiene que ser como: tarea8.com"
-    return $false
-}
-
-function Pedir-Dominio {
-    Clear-Host
-    Write-Host ""
-    Escribir-Info "======== DOMINIO ========"
-    Write-Host ""
-    while ($true) {
-        $entrada = Read-Host "Ingresa el dominio"
-        $entrada = $entrada.Trim().ToLower()
-        if (Validar-Dominio $entrada) {
-            $netbios = ($entrada -split '\.')[0].ToUpper()
-            if ($netbios.Length -gt 15) { $netbios = $netbios.Substring(0, 15) }
-            $global:DOMINIO = $entrada
-            $global:NETBIOS = $netbios
-            Escribir-Ok "Dominio : $global:DOMINIO"
-            Escribir-Ok "NetBIOS : $global:NETBIOS"
-            return
+    Print-Info "Creando Unidades Organizativas..."
+    foreach ($ou in @("Cuates", "NoCuates")) {
+        try {
+            New-ADOrganizationalUnit -Name $ou -Path $script:DC_PATH `
+                -ProtectedFromAccidentalDeletion $false -ErrorAction Stop
+            Print-Ok "OU creada: $ou"
+        } catch {
+            Print-Warn "OU ya existe: $ou"
         }
     }
-}
 
-# Carga el dominio desde AD si la variable global esta vacia
-# Todas las funciones que necesiten el dominio deben llamar esto primero
-function Cargar-Dominio {
-    if ([string]::IsNullOrEmpty($global:DOMINIO)) {
-        $ad = Get-ADDomain -ErrorAction SilentlyContinue
-        if ($ad) {
-            $global:DOMINIO = $ad.DNSRoot
-            $global:NETBIOS = $ad.NetBIOSName
-            Escribir-Info "Dominio cargado: $global:DOMINIO"
-        } else {
-            Escribir-Error "No se encontro ningun dominio. Ejecuta primero la opcion 1."
-            return $false
+    Print-Info "Creando grupos de seguridad..."
+    foreach ($grupo in @("Cuates", "NoCuates")) {
+        try {
+            New-ADGroup -Name $grupo `
+                -GroupScope    Global `
+                -GroupCategory Security `
+                -Path          "OU=$grupo,$($script:DC_PATH)" `
+                -ErrorAction   Stop
+            Print-Ok "Grupo creado: $grupo"
+        } catch {
+            Print-Warn "Grupo ya existe: $grupo"
         }
     }
-    return $true
-}
 
-#  ACTIVE DIRECTORY
+    Print-Info "Leyendo CSV: $($script:RUTA_CSV)"
 
-function Instalar-AD {
-    Clear-Host
-    Escribir-Titulo "Verificando Active Directory"
-
-    $rol = Get-WindowsFeature -Name AD-Domain-Services -ErrorAction SilentlyContinue
-    if ($rol.Installed) {
-        Escribir-Ok "AD DS ya esta instalado :)"
+    if (-not (Test-Path $script:RUTA_CSV)) {
+        Print-Err "CSV no encontrado en: $($script:RUTA_CSV)"
+        Print-Err "Asegurate de que usuarios.csv este en la misma carpeta que tarea8.ps1"
         return
     }
 
-    Escribir-Info "Instalando rol AD DS..."
-    Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools | Out-Null
-
-    $rol = Get-WindowsFeature -Name AD-Domain-Services
-    if ($rol.Installed) {
-        Escribir-Ok "AD DS instalado correctamente :)"
-    } else {
-        Escribir-Error "No se pudo instalar AD DS"
-        exit 1
-    }
-}
-
-function Configurar-Dominio {
-    Clear-Host
-    Escribir-Titulo "Configuracion del Dominio"
-
-    $dominioActual = (Get-ADDomain -ErrorAction SilentlyContinue).DNSRoot
-    if ($dominioActual) {
-        Escribir-Ok "Ya existe un dominio: $dominioActual"
-        $global:DOMINIO = $dominioActual
-        $global:NETBIOS = (Get-ADDomain).NetBIOSName
-        return
-    }
-
-    Pedir-Dominio
-
-    Clear-Host
-    Escribir-Titulo "Promoviendo Servidor a Domain Controller"
-    Escribir-Info "Dominio : $global:DOMINIO"
-    Escribir-Info "NetBIOS : $global:NETBIOS"
-    Write-Host ""
-
-    $passwordSegura = ConvertTo-SecureString $global:PASSWORD_ADMIN -AsPlainText -Force
-
-    try {
-        Install-ADDSForest `
-            -DomainName $global:DOMINIO `
-            -DomainNetbiosName $global:NETBIOS `
-            -SafeModeAdministratorPassword $passwordSegura `
-            -InstallDns `
-            -Force `
-            -NoRebootOnCompletion | Out-Null
-
-        Escribir-Ok "Dominio configurado. El servidor se reiniciara automaticamente."
-        Escribir-Info "Vuelve a ejecutar el script despues del reinicio para continuar."
-        Start-Sleep -Seconds 5
-        Restart-Computer -Force
-
-    } catch {
-        Escribir-Error "Error al configurar el dominio: $_"
-        exit 1
-    }
-}
-
-function Crear-OUs {
-    Clear-Host
-    Escribir-Titulo "Creando Unidades"
-
-    if (-not (Cargar-Dominio)) { return }
-
-    $base = "DC=" + ($global:DOMINIO -replace '\.', ',DC=')
-
-    foreach ($ou in @("Cuates", "No Cuates")) {
-        $existe = Get-ADOrganizationalUnit -Filter "Name -eq '$ou'" -ErrorAction SilentlyContinue
-        if ($existe) {
-            Escribir-Info "OU '$ou' ya existe"
-        } else {
-            New-ADOrganizationalUnit -Name $ou -Path $base -ProtectedFromAccidentalDeletion $false
-            Escribir-Ok "OU '$ou' creado"
-        }
-    }
-}
-
-function Crear-Usuarios {
-    Clear-Host
-    Escribir-Titulo "Creando Usuarios desde CSV"
-
-    if (-not (Cargar-Dominio)) { return }
-
-    if (-not (Test-Path $global:RUTA_CSV)) {
-        Escribir-Error "No se encontro el archivo CSV en: $global:RUTA_CSV"
-        exit 1
-    }
-
-    $base     = "DC=" + ($global:DOMINIO -replace '\.', ',DC=')
-    $usuarios = Import-Csv -Path $global:RUTA_CSV
+    $usuarios = Import-Csv $script:RUTA_CSV
 
     foreach ($u in $usuarios) {
-        $nombre   = $u.Nombre.Trim()
-        $password = ConvertTo-SecureString $u.Password -AsPlainText -Force
-        $depto    = $u.Departamento.Trim()
-        $ouPath   = "OU=$depto,$base"
-
-        $existe = Get-ADUser -Filter "SamAccountName -eq '$nombre'" -ErrorAction SilentlyContinue
-        if ($existe) {
-            Escribir-Info "Usuario '$nombre' ya existe"
-            continue
-        }
+        $grupoInterno = if ($u.Departamento.Trim() -eq "Cuates") { "Cuates" } else { "NoCuates" }
+        $ouPath       = "OU=$grupoInterno,$($script:DC_PATH)"
+        $pass         = ConvertTo-SecureString $u.Password -AsPlainText -Force
 
         try {
             New-ADUser `
-                -Name $nombre `
-                -SamAccountName $nombre `
-                -UserPrincipalName "$nombre@$global:DOMINIO" `
-                -Path $ouPath `
-                -AccountPassword $password `
-                -Department $depto `
-                -Enabled $true `
-                -PasswordNeverExpires $true
-
-            $carpeta = "$global:RUTA_CARPETAS\$nombre"
-            if (-not (Test-Path $carpeta)) {
-                New-Item -ItemType Directory -Path $carpeta -Force | Out-Null
-            }
-
-            $acl   = Get-Acl $carpeta
-            $regla = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                "$global:NETBIOS\$nombre", "Modify", "ContainerInherit,ObjectInherit", "None", "Allow"
-            )
-            $acl.SetAccessRule($regla)
-            Set-Acl -Path $carpeta -AclObject $acl
-
-            Escribir-Ok "Usuario '$nombre' creado en OU '$depto'"
+                -Name              $u.Nombre `
+                -SamAccountName    $u.Nombre `
+                -UserPrincipalName "$($u.Nombre)@$($script:DOMINIO)" `
+                -AccountPassword   $pass `
+                -Path              $ouPath `
+                -Enabled           $true `
+                -ChangePasswordAtLogon $false `
+                -PasswordNeverExpires  $true `
+                -ErrorAction       Stop
+            Print-Ok "Usuario creado: $($u.Nombre) -> $grupoInterno"
         } catch {
-            Escribir-Error "Error creando '$nombre': $_"
-        }
-    }
-}
-
-function Configurar-AD {
-    Instalar-AD
-    Configurar-Dominio
-    Crear-OUs
-    Crear-Usuarios
-}
-
-#  GPO Y HORARIOS
-
-function Calcular-BytesHorario {
-    param(
-        [int]$horaInicio,
-        [int]$horaFin
-    )
-
-    $bytes = New-Object byte[] 21
-
-    for ($hora = 0; $hora -lt 168; $hora++) {
-        $horaDia = $hora % 24
-
-        $permitido = $false
-        if ($horaFin -gt $horaInicio) {
-            $permitido = ($horaDia -ge $horaInicio -and $horaDia -lt $horaFin)
-        } else {
-            $permitido = ($horaDia -ge $horaInicio -or $horaDia -lt $horaFin)
-        }
-
-        if ($permitido) {
-            $byteIndex = [math]::Floor($hora / 8)
-            $bitIndex  = $hora % 8
-            $bytes[$byteIndex] = $bytes[$byteIndex] -bor (1 -shl $bitIndex)
-        }
-    }
-
-    return $bytes
-}
-
-function Configurar-Horarios {
-    Clear-Host
-    Escribir-Titulo "Configurando Horarios de Acceso"
-
-    if (-not (Cargar-Dominio)) { return }
-
-    # Cast explicito a [byte[]] — requerido por Set-ADUser
-    $bytesCuates   = [byte[]](Calcular-BytesHorario -horaInicio 8  -horaFin 15)
-    $bytesNoCuates = [byte[]](Calcular-BytesHorario -horaInicio 15 -horaFin 2)
-
-    $usuarios = Import-Csv -Path $global:RUTA_CSV
-
-    foreach ($u in $usuarios) {
-        $nombre = $u.Nombre.Trim()
-        $depto  = $u.Departamento.Trim()
-
-        $adUser = Get-ADUser -Filter "SamAccountName -eq '$nombre'" -Properties logonHours -ErrorAction SilentlyContinue
-        if (-not $adUser) {
-            Escribir-Error "Usuario '$nombre' no encontrado en AD"
-            continue
+            Print-Warn "Usuario ya existe o error: $($u.Nombre)"
         }
 
         try {
-            if ($depto -eq "Cuates") {
-                $bytes = $bytesCuates
-            } else {
-                $bytes = $bytesNoCuates
-            }
-
-            # Si ya tiene logonHours limpiar primero, luego agregar
-            if ($adUser.logonHours) {
-                Set-ADUser -Identity $nombre -Clear logonHours
-            }
-            Set-ADUser -Identity $nombre -Add @{logonHours = [byte[]]$bytes}
-
-            if ($depto -eq "Cuates") {
-                Escribir-Ok "'$nombre' - Horario Cuates (8:00 AM - 3:00 PM)"
-            } else {
-                Escribir-Ok "'$nombre' - Horario No Cuates (3:00 PM - 2:00 AM)"
-            }
+            Add-ADGroupMember -Identity $grupoInterno -Members $u.Nombre -ErrorAction Stop
         } catch {
-            Escribir-Error "Error aplicando horario a '$nombre': $_"
+            Print-Warn "$($u.Nombre) ya esta en grupo $grupoInterno"
+        }
+
+        $rutaUser = "$($script:RUTA_PERFILES)\$($u.Nombre)"
+        if (-not (Test-Path $rutaUser)) {
+            New-Item -Path $rutaUser -ItemType Directory -Force | Out-Null
         }
     }
-}
 
-function Configurar-CierreSesion {
-    Clear-Host
-    Escribir-Titulo "Configurando GPO de Cierre de Sesion"
-
-    if (-not (Cargar-Dominio)) { return }
-
-    $nombreGPO = "T8-CierreSesion"
-
-    $gpo = Get-GPO -Name $nombreGPO -ErrorAction SilentlyContinue
-    if (-not $gpo) {
-        $gpo = New-GPO -Name $nombreGPO
-        Escribir-Ok "GPO '$nombreGPO' creada"
+    Print-Info "Configurando recurso compartido SMB..."
+    if (-not (Get-SmbShare -Name $script:SHARE_NAME -ErrorAction SilentlyContinue)) {
+        New-SmbShare -Name $script:SHARE_NAME `
+                     -Path $script:RUTA_PERFILES `
+                     -FullAccess "Administradores" `
+                     -ChangeAccess "Usuarios del dominio" `
+                     -Description "Carpetas personales"
+        Print-Ok "Recurso compartido \\$env:COMPUTERNAME\$($script:SHARE_NAME) creado."
     } else {
-        Escribir-Info "GPO '$nombreGPO' ya existe, actualizando"
+        Print-Warn "Recurso compartido ya existe."
     }
 
-    Set-GPRegistryValue `
-        -Name $nombreGPO `
-        -Key "HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" `
-        -ValueName "EnableForcedLogOff" `
-        -Type DWord `
-        -Value 1 | Out-Null
+    Print-Ok "Estructura AD completa."
+}
 
-    $base = "DC=" + ($global:DOMINIO -replace '\.', ',DC=')
+function asignarHorarios {
+    param(
+        [string]$Grupo,
+        [int[]]$HorasLocales
+    )
+
+    $horasUTC = $HorasLocales | ForEach-Object {
+        (($_ - $script:UTC_OFFSET) % 24 + 24) % 24
+    }
+
+    Print-Info "Horario '$Grupo': local=[$($HorasLocales -join ',')] -> UTC=[$($horasUTC -join ',')]"
+
+    $bytes = [byte[]](,0x00 * 21)
+
+    for ($dia = 0; $dia -lt 7; $dia++) {
+        foreach ($hora in $horasUTC) {
+            $bit     = ($dia * 24) + $hora
+            $byteIdx = [Math]::Floor($bit / 8)
+            $bitIdx  = $bit % 8
+            $bytes[$byteIdx] = $bytes[$byteIdx] -bor (1 -shl $bitIdx)
+        }
+    }
+
+    Get-ADGroupMember -Identity $Grupo |
+        Where-Object { $_.objectClass -eq "user" } |
+        ForEach-Object {
+            Set-ADUser -Identity $_.SamAccountName -Replace @{ logonHours = $bytes }
+            Print-Ok "  Horario -> $($_.SamAccountName)"
+        }
+}
+
+function configurarHorarios {
+    Print-Info "=== CONFIGURANDO HORARIOS ==="
+
+    asignarHorarios -Grupo "Cuates" -HorasLocales (8..14)
+
+    asignarHorarios -Grupo "NoCuates" -HorasLocales @(15,16,17,18,19,20,21,22,23,0,1)
+
+    Print-Info "Creando GPO de logoff forzado..."
+
+    $nombreGPO = "GPO-Forzar-Logoff"
+
+    if (-not (Get-GPO -Name $nombreGPO -ErrorAction SilentlyContinue)) {
+        New-GPO -Name $nombreGPO | Out-Null
+        Print-Ok "GPO creada: $nombreGPO"
+    } else {
+        Print-Warn "GPO ya existe: $nombreGPO"
+    }
+
     try {
-        New-GPLink -Name $nombreGPO -Target $base -ErrorAction SilentlyContinue | Out-Null
-        Escribir-Ok "GPO vinculada al dominio '$global:DOMINIO'"
+        New-GPLink -Name $nombreGPO -Target $script:DC_PATH -LinkEnabled Yes -ErrorAction Stop
+        Print-Ok "GPO vinculada al dominio."
     } catch {
-        Escribir-Info "El vinculo ya existia o no se pudo crear: $_"
+        Print-Warn "Vinculo GPO ya existe."
     }
 
-    Invoke-GPUpdate -Force -ErrorAction SilentlyContinue | Out-Null
-    Escribir-Ok "Politicas actualizadas"
+    Set-GPRegistryValue -Name $nombreGPO `
+        -Key       "HKLM\System\CurrentControlSet\Services\LanmanServer\Parameters" `
+        -ValueName "EnableForcedLogOff" `
+        -Type      DWord `
+        -Value     1
+
+    Print-Ok "Horarios y GPO de logoff configurados."
 }
 
-function Configurar-GPO {
-    Configurar-Horarios
-    Configurar-CierreSesion
-}
+function configurarFSRM {
+    Print-Info "=== CONFIGURANDO FSRM ==="
 
-#  FSRM
+    Import-Module FileServerResourceManager -ErrorAction Stop
 
-function Instalar-FSRM {
-    Clear-Host
-    Escribir-Titulo "Verificando FSRM"
+    $accionAviso = New-FsrmAction -Type Event -EventType Warning `
+        -Body "FSRM: [Source Io Owner] alcanzo 85%% de cuota en [Quota Path]."
 
-    $rol = Get-WindowsFeature -Name FS-Resource-Manager -ErrorAction SilentlyContinue
-    if ($rol.Installed) {
-        Escribir-Ok "FSRM ya esta instalado :)"
-        return
+    $accionLimite = New-FsrmAction -Type Event -EventType Warning `
+        -Body "FSRM: [Source Io Owner] supero cuota en [Quota Path]. Archivo: [Source File Path]."
+
+    $umbral85  = New-FsrmQuotaThreshold -Percentage 85  -Action $accionAviso
+    $umbral100 = New-FsrmQuotaThreshold -Percentage 100 -Action $accionLimite
+
+    Print-Info "Creando plantillas de cuota..."
+    Remove-FsrmQuotaTemplate -Name "Cuota-Cuates"   -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-FsrmQuotaTemplate -Name "Cuota-NoCuates"  -Confirm:$false -ErrorAction SilentlyContinue
+
+    New-FsrmQuotaTemplate -Name "Cuota-Cuates"   -Size (10MB) -Threshold @($umbral85, $umbral100)
+    Print-Ok "Plantilla: Cuota-Cuates (10 MB)"
+
+    New-FsrmQuotaTemplate -Name "Cuota-NoCuates" -Size (5MB)  -Threshold @($umbral85, $umbral100)
+    Print-Ok "Plantilla: Cuota-NoCuates (5 MB)"
+
+    Print-Info "Aplicando cuotas por usuario..."
+
+    Get-ADGroupMember -Identity "Cuates" | ForEach-Object {
+        $ruta = "$($script:RUTA_PERFILES)\$($_.SamAccountName)"
+        if (-not (Test-Path $ruta)) { New-Item -Path $ruta -ItemType Directory -Force | Out-Null }
+        Remove-FsrmQuota -Path $ruta -Confirm:$false -ErrorAction SilentlyContinue
+        New-FsrmQuota -Path $ruta -Template "Cuota-Cuates"
+        Print-Ok "  10MB -> $($_.SamAccountName)"
     }
 
-    Escribir-Info "Instalando FSRM..."
-    Install-WindowsFeature -Name FS-Resource-Manager -IncludeManagementTools | Out-Null
-
-    $rol = Get-WindowsFeature -Name FS-Resource-Manager
-    if ($rol.Installed) {
-        Escribir-Ok "FSRM instalado correctamente :)"
-    } else {
-        Escribir-Error "No se pudo instalar FSRM :("
-        exit 1
-    }
-}
-
-function Configurar-Cuotas {
-    Clear-Host
-    Escribir-Titulo "Configurando Cuotas de Disco"
-
-    Import-Module FileServerResourceManager -ErrorAction SilentlyContinue
-
-    $plantilla5MB  = "T8-Cuota-5MB"
-    $plantilla10MB = "T8-Cuota-10MB"
-
-    $existe5 = Get-FsrmQuotaTemplate -Name $plantilla5MB -ErrorAction SilentlyContinue
-    if (-not $existe5) {
-        New-FsrmQuotaTemplate -Name $plantilla5MB -Size 5MB | Out-Null
-        Escribir-Ok "Plantilla '$plantilla5MB' creada"
-    } else {
-        Escribir-Info "Plantilla '$plantilla5MB' ya existe"
+    Get-ADGroupMember -Identity "NoCuates" | ForEach-Object {
+        $ruta = "$($script:RUTA_PERFILES)\$($_.SamAccountName)"
+        if (-not (Test-Path $ruta)) { New-Item -Path $ruta -ItemType Directory -Force | Out-Null }
+        Remove-FsrmQuota -Path $ruta -Confirm:$false -ErrorAction SilentlyContinue
+        New-FsrmQuota -Path $ruta -Template "Cuota-NoCuates"
+        Print-Ok "  5MB -> $($_.SamAccountName)"
     }
 
-    $existe10 = Get-FsrmQuotaTemplate -Name $plantilla10MB -ErrorAction SilentlyContinue
-    if (-not $existe10) {
-        New-FsrmQuotaTemplate -Name $plantilla10MB -Size 10MB | Out-Null
-        Escribir-Ok "Plantilla '$plantilla10MB' creada"
-    } else {
-        Escribir-Info "Plantilla '$plantilla10MB' ya existe"
-    }
+    Print-Info "Configurando apantallamiento de archivos..."
 
-    $usuarios = Import-Csv -Path $global:RUTA_CSV
+    $accionBloqueo = New-FsrmAction -Type Event -EventType Warning `
+        -Body "FSRM BLOQUEO: [Source Io Owner] intento guardar [Source File Path] en [File Screen Path]."
 
-    foreach ($u in $usuarios) {
-        $nombre  = $u.Nombre.Trim()
-        $depto   = $u.Departamento.Trim()
-        $carpeta = "$global:RUTA_CARPETAS\$nombre"
+    Remove-FsrmFileGroup          -Name "Archivos-Prohibidos" -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-FsrmFileScreenTemplate -Name "Pantalla-Prohibidos" -Confirm:$false -ErrorAction SilentlyContinue
 
-        if (-not (Test-Path $carpeta)) {
-            Escribir-Error "Carpeta '$carpeta' no existe. Crea los usuarios primero"
-            continue
+    New-FsrmFileGroup -Name "Archivos-Prohibidos" `
+        -IncludePattern @("*.mp3","*.mp4","*.avi","*.mkv","*.wmv","*.exe","*.msi","*.bat","*.cmd")
+    Print-Ok "Grupo de archivos prohibidos creado."
+
+    New-FsrmFileScreenTemplate -Name "Pantalla-Prohibidos" `
+        -Active `
+        -IncludeGroup @("Archivos-Prohibidos") `
+        -Notification $accionBloqueo
+    Print-Ok "Plantilla de apantallamiento activo creada."
+
+    foreach ($grupo in @("Cuates","NoCuates")) {
+        Get-ADGroupMember -Identity $grupo | ForEach-Object {
+            $ruta = "$($script:RUTA_PERFILES)\$($_.SamAccountName)"
+            if (Test-Path $ruta) {
+                Remove-FsrmFileScreen -Path $ruta -Confirm:$false -ErrorAction SilentlyContinue
+                New-FsrmFileScreen -Path $ruta -Template "Pantalla-Prohibidos"
+                Print-Ok "  Pantalla -> $($_.SamAccountName)"
+            }
         }
-
-        Remove-FsrmQuota -Path $carpeta -Confirm:$false -ErrorAction SilentlyContinue
-
-        if ($depto -eq "Cuates") {
-            New-FsrmQuota -Path $carpeta -Template $plantilla10MB | Out-Null
-            Escribir-Ok "'$nombre' - Cuota 10 MB (Cuates)"
-        } else {
-            New-FsrmQuota -Path $carpeta -Template $plantilla5MB | Out-Null
-            Escribir-Ok "'$nombre' - Cuota 5 MB (No Cuates)"
-        }
-    }
-}
-
-function Configurar-Apantallamiento {
-    Clear-Host
-    Escribir-Titulo "Configurando Apantallamiento de Archivos"
-
-    Import-Module FileServerResourceManager -ErrorAction SilentlyContinue
-
-    $nombreGrupo = "T8-ArchivosProhibidos"
-
-    $existeGrupo = Get-FsrmFileGroup -Name $nombreGrupo -ErrorAction SilentlyContinue
-    if (-not $existeGrupo) {
-        New-FsrmFileGroup `
-            -Name $nombreGrupo `
-            -IncludePattern @("*.mp3", "*.mp4", "*.exe", "*.msi") | Out-Null
-        Escribir-Ok "Grupo '$nombreGrupo' creado con: *.mp3, *.mp4, *.exe, *.msi"
-    } else {
-        Set-FsrmFileGroup `
-            -Name $nombreGrupo `
-            -IncludePattern @("*.mp3", "*.mp4", "*.exe", "*.msi") | Out-Null
-        Escribir-Info "Grupo '$nombreGrupo' actualizado"
     }
 
-    $usuarios = Import-Csv -Path $global:RUTA_CSV
-
-    foreach ($u in $usuarios) {
-        $nombre  = $u.Nombre.Trim()
-        $carpeta = "$global:RUTA_CARPETAS\$nombre"
-
-        if (-not (Test-Path $carpeta)) {
-            Escribir-Error "Carpeta '$carpeta' no existe. Crea los usuarios primero"
-            continue
-        }
-
-        Remove-FsrmFileScreen -Path $carpeta -Confirm:$false -ErrorAction SilentlyContinue
-
-        New-FsrmFileScreen `
-            -Path $carpeta `
-            -IncludeGroup @($nombreGrupo) `
-            -Active | Out-Null
-
-        Escribir-Ok "'$nombre' - Apantallamiento activo aplicado"
-    }
+    Print-Ok "FSRM configurado."
 }
 
-function Configurar-FSRM {
-    Instalar-FSRM
-    Configurar-Cuotas
-    Configurar-Apantallamiento
-}
+function configurarAppLocker {
+    Print-Info "=== CONFIGURANDO APPLOCKER ==="
 
-#  APPLOCKER
-
-function Instalar-Dependencias-AppLocker {
-    Escribir-Info "Verificando servicio de AppLocker (AppIDSvc)..."
-    $svc = Get-Service -Name AppIDSvc -ErrorAction SilentlyContinue
-    if ($svc) {
-        Set-Service -Name AppIDSvc -StartupType Automatic
-        Start-Service -Name AppIDSvc -ErrorAction SilentlyContinue
-        Escribir-Ok "Servicio AppIDSvc activo"
-    } else {
-        Escribir-Error "Servicio AppIDSvc no encontrado. AppLocker podria no funcionar"
-    }
-}
-
-function Obtener-Hash-Notepad {
     $rutaNotepad = "$env:SystemRoot\System32\notepad.exe"
+
     if (-not (Test-Path $rutaNotepad)) {
-        Escribir-Error "No se encontro notepad.exe en $rutaNotepad"
-        return $null
-    }
-    $info = Get-AppLockerFileInformation -Path $rutaNotepad
-    return $info
-}
-
-function Configurar-AppLocker {
-    Clear-Host
-    Escribir-Titulo "Configurando AppLocker"
-
-    if (-not (Cargar-Dominio)) { return }
-
-    Instalar-Dependencias-AppLocker
-
-    $infoNotepad = Obtener-Hash-Notepad
-    if (-not $infoNotepad) {
-        Escribir-Error "No se pudo obtener informacion de notepad.exe"
+        Print-Err "notepad.exe no encontrado en $rutaNotepad"
         return
     }
 
-    $rutaNotepad = "$env:SystemRoot\System32\notepad.exe"
-    $hash        = (Get-FileHash -Path $rutaNotepad -Algorithm SHA256).Hash
-    $hashFormato = "0x" + $hash
+    Print-Info "Calculando hash de notepad.exe..."
+    $info   = Get-AppLockerFileInformation -Path $rutaNotepad
+    $hash   = $info.Hash[0].HashDataString
+    $tamano = (Get-Item $rutaNotepad).Length
+    Print-Info "Hash: $hash | Tamano: $tamano bytes"
 
-    $sidCuates   = (Get-ADGroup -Filter "Name -eq 'Cuates'"    -ErrorAction SilentlyContinue).SID.Value
-    $sidNoCuates = (Get-ADGroup -Filter "Name -eq 'No Cuates'" -ErrorAction SilentlyContinue).SID.Value
+    $sidCuates   = (Get-ADGroup -Identity "Cuates").SID.Value
+    $sidNoCuates = (Get-ADGroup -Identity "NoCuates").SID.Value
+    $sidAdmins   = "S-1-5-32-544"
+    $sidTodos    = "S-1-1-0"
 
-    if (-not $sidCuates -or -not $sidNoCuates) {
-        Clear-Host
-        Escribir-Titulo "Creando Grupos de Seguridad"
+    $g1 = [System.Guid]::NewGuid().ToString()
+    $g2 = [System.Guid]::NewGuid().ToString()
+    $g3 = [System.Guid]::NewGuid().ToString()
+    $g4 = [System.Guid]::NewGuid().ToString()
+    $g5 = [System.Guid]::NewGuid().ToString()
 
-        $base = "DC=" + ($global:DOMINIO -replace '\.', ',DC=')
-
-        if (-not (Get-ADGroup -Filter "Name -eq 'Cuates'" -ErrorAction SilentlyContinue)) {
-            New-ADGroup -Name "Cuates" -GroupScope Global -Path "OU=Cuates,$base" | Out-Null
-            Escribir-Ok "Grupo 'Cuates' creado"
-        }
-        if (-not (Get-ADGroup -Filter "Name -eq 'No Cuates'" -ErrorAction SilentlyContinue)) {
-            New-ADGroup -Name "No Cuates" -GroupScope Global -Path "OU=No Cuates,$base" | Out-Null
-            Escribir-Ok "Grupo 'No Cuates' creado"
-        }
-
-        $usuarios = Import-Csv -Path $global:RUTA_CSV
-        foreach ($u in $usuarios) {
-            $nombre = $u.Nombre.Trim()
-            $depto  = $u.Departamento.Trim()
-            Add-ADGroupMember -Identity $depto -Members $nombre -ErrorAction SilentlyContinue
-        }
-        Escribir-Ok "Usuarios agregados a sus grupos"
-
-        $sidCuates   = (Get-ADGroup -Filter "Name -eq 'Cuates'"    ).SID.Value
-        $sidNoCuates = (Get-ADGroup -Filter "Name -eq 'No Cuates'" ).SID.Value
-    }
-
-    $xmlPolicy = @"
+    $xml = @"
+<?xml version="1.0" encoding="utf-8"?>
 <AppLockerPolicy Version="1">
   <RuleCollection Type="Exe" EnforcementMode="Enabled">
-
-    <!-- Regla base: administradores pueden ejecutar todo -->
-    <FilePathRule Id="fd686d83-a829-4351-8ff4-27c7de5755d2"
-                  Name="Todos los archivos en Windows"
-                  Description="Permite ejecutar archivos del sistema"
-                  UserOrGroupSid="S-1-5-32-544"
-                  Action="Allow">
-      <Conditions>
-        <FilePathCondition Path="%WINDIR%\*" />
-      </Conditions>
+    <FilePathRule Id="$g1" Name="Admins - todo permitido" Description="" UserOrGroupSid="$sidAdmins" Action="Allow">
+      <Conditions><FilePathCondition Path="*"/></Conditions>
     </FilePathRule>
-
-    <FilePathRule Id="921cc481-6e17-4653-8f75-050b80acca20"
-                  Name="Todos los archivos en Archivos de programa"
-                  Description="Permite ejecutar archivos de programa"
-                  UserOrGroupSid="S-1-5-32-544"
-                  Action="Allow">
-      <Conditions>
-        <FilePathCondition Path="%PROGRAMFILES%\*" />
-      </Conditions>
+    <FilePathRule Id="$g5" Name="Everyone - Windows base" Description="" UserOrGroupSid="$sidTodos" Action="Allow">
+      <Conditions><FilePathCondition Path="%WINDIR%\*"/></Conditions>
     </FilePathRule>
-
-    <!-- Cuates: PERMITIDO ejecutar Bloc de Notas por ruta -->
-    <FilePathRule Id="a61c8b2c-1111-2222-3333-000000000001"
-                  Name="Cuates - Permitir Bloc de Notas"
-                  Description="El grupo Cuates puede ejecutar notepad.exe"
-                  UserOrGroupSid="$sidCuates"
-                  Action="Allow">
-      <Conditions>
-        <FilePathCondition Path="%WINDIR%\System32\notepad.exe" />
-      </Conditions>
+    <FilePathRule Id="$g2" Name="Cuates - notepad permitido" Description="" UserOrGroupSid="$sidCuates" Action="Allow">
+      <Conditions><FilePathCondition Path="%SYSTEM32%\notepad.exe"/></Conditions>
     </FilePathRule>
-
-    <!-- No Cuates: BLOQUEADO por Hash (no se puede evadir renombrando) -->
-    <FileHashRule Id="a61c8b2c-1111-2222-3333-000000000002"
-                  Name="No Cuates - Bloquear Bloc de Notas por Hash"
-                  Description="Bloquea notepad.exe por su hash SHA256"
-                  UserOrGroupSid="$sidNoCuates"
-                  Action="Deny">
+    <FileHashRule Id="$g3" Name="NoCuates - notepad bloqueado por hash" Description="" UserOrGroupSid="$sidNoCuates" Action="Deny">
       <Conditions>
         <FileHashCondition>
-          <FileHash Type="SHA256"
-                    Data="$hashFormato"
-                    SourceFileName="notepad.exe"
-                    SourceFileLength="0" />
+          <FileHash Type="SHA256" Data="$hash" SourceFileName="notepad.exe" SourceFileLength="$tamano"/>
         </FileHashCondition>
       </Conditions>
     </FileHashRule>
-
+    <FilePathRule Id="$g4" Name="NoCuates - permitir Windows" Description="" UserOrGroupSid="$sidNoCuates" Action="Allow">
+      <Conditions><FilePathCondition Path="%WINDIR%\*"/></Conditions>
+    </FilePathRule>
   </RuleCollection>
+  <RuleCollection Type="Script" EnforcementMode="NotConfigured"/>
+  <RuleCollection Type="Msi"    EnforcementMode="NotConfigured"/>
+  <RuleCollection Type="Dll"    EnforcementMode="NotConfigured"/>
+  <RuleCollection Type="Appx"   EnforcementMode="NotConfigured"/>
 </AppLockerPolicy>
 "@
 
-    $rutaXML = "$env:TEMP\T8_AppLocker.xml"
-    $xmlPolicy | Out-File -FilePath $rutaXML -Encoding UTF8 -Force
+    $rutaXML = "C:\applocker-policy.xml"
+    $xml | Out-File $rutaXML -Encoding UTF8
+    Print-Ok "XML guardado: $rutaXML"
+
+    $nombreGPO = "GPO-AppLocker"
+
+    if (-not (Get-GPO -Name $nombreGPO -ErrorAction SilentlyContinue)) {
+        New-GPO -Name $nombreGPO | Out-Null
+        Print-Ok "GPO creada: $nombreGPO"
+    } else {
+        Print-Warn "GPO ya existe: $nombreGPO"
+    }
 
     try {
-        Set-AppLockerPolicy -XmlPolicy $rutaXML -Merge
-        Escribir-Ok "Politica AppLocker aplicada"
-        Escribir-Ok "Cuates    -> Bloc de Notas PERMITIDO"
-        Escribir-Ok "No Cuates -> Bloc de Notas BLOQUEADO por hash"
+        New-GPLink -Name $nombreGPO -Target $script:DC_PATH -LinkEnabled Yes -ErrorAction Stop
+        Print-Ok "GPO vinculada."
     } catch {
-        Escribir-Error "Error al aplicar politica AppLocker: $_"
+        Print-Warn "Vinculo GPO ya existe."
     }
 
-    gpupdate /force 2>&1 | Out-Null
-    Escribir-Ok "Politicas de grupo actualizadas"
+    Set-GPRegistryValue -Name $nombreGPO `
+        -Key "HKLM\SYSTEM\CurrentControlSet\Services\AppIDSvc" `
+        -ValueName "Start" -Type DWord -Value 2
+
+    $gpoObj   = Get-GPO -Name $nombreGPO
+    $gpoId    = $gpoObj.Id.ToString().ToUpper()
+    $ldapPath = "LDAP://CN={$gpoId},CN=Policies,CN=System,$($script:DC_PATH)"
+
+    Print-Info "Aplicando politica al GPO via LDAP..."
+    Set-AppLockerPolicy -XMLPolicy $rutaXML -Ldap $ldapPath -Merge
+    Print-Ok "Politica AppLocker aplicada al GPO."
+
+    Set-Service -Name AppIDSvc -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service -Name AppIDSvc -ErrorAction SilentlyContinue
+    Invoke-GPUpdate -Force -ErrorAction SilentlyContinue
+
+    Print-Ok "AppLocker configurado. Renombrar notepad NO evita el bloqueo."
 }
 
-#  INFORMACION DEL SERVIDOR
+function unirClienteWindows {
+    Print-Info "=== UNIR CLIENTE WINDOWS AL DOMINIO ==="
+    Print-Warn "Ejecuta esto SOLO en el cliente Windows, NO en el servidor."
 
-function Mostrar-Info {
-    Clear-Host
-    Escribir-Titulo "Informacion del Servidor"
+    $ipDC = Read-Host "IP del servidor DC"
 
-    $ip = Obtener-IP
-    Write-Host "  IP del Servidor   : $ip"
+    $adapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | Select-Object -First 1
+    Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $ipDC
+    Print-Ok "DNS -> $ipDC"
 
-    $dominioActual = (Get-ADDomain -ErrorAction SilentlyContinue).DNSRoot
-    if ($dominioActual) {
-        Write-Host "  Dominio           : $dominioActual"
-        Write-Host "  NetBIOS           : $((Get-ADDomain).NetBIOSName)"
-    } else {
-        Write-Host "  Dominio           : No configurado"
+    $cred = Get-Credential -Message "Credenciales de EMPRESA\Administrador"
+    Add-Computer -DomainName $script:DOMINIO -Credential $cred -Restart -Force
+
+    Print-Warn "El equipo se reiniciara."
+}
+
+function verificar {
+    Write-Host ""
+    Write-Host "=============================================" -ForegroundColor Yellow
+    Write-Host "          VERIFICACION DEL ENTORNO           " -ForegroundColor Yellow
+    Write-Host "=============================================" -ForegroundColor Yellow
+
+    # OUs
+    Print-Info "--- OUs ---"
+    foreach ($ou in @("Cuates","NoCuates")) {
+        $found = Get-ADOrganizationalUnit -Filter "Name -eq '$ou'" -ErrorAction SilentlyContinue
+        if ($found) { Print-Ok "OU: $ou" } else { Print-Err "OU falta: $ou" }
     }
 
-    Write-Host ""
-    Write-Host "  --- Roles instalados ---"
-    $roles = @("AD-Domain-Services", "FS-Resource-Manager", "GPMC")
-    foreach ($rol in $roles) {
-        $r      = Get-WindowsFeature -Name $rol -ErrorAction SilentlyContinue
-        $estado = if ($r.Installed) { "Instalado" } else { "No instalado" }
-        Write-Host "  $rol : $estado"
+    Print-Info "--- Grupos ---"
+    foreach ($g in @("Cuates","NoCuates")) {
+        $m = Get-ADGroupMember -Identity $g -ErrorAction SilentlyContinue
+        if ($m) { Print-Ok "$g -> $($m.Count) miembros: $(($m | Select-Object -Expand SamAccountName) -join ', ')" }
+        else    { Print-Err "$g vacio o no existe" }
     }
 
-    Write-Host ""
-    Write-Host "  --- Usuarios en AD ---"
-    $usuariosAD = Get-ADUser -Filter * -Properties Department -ErrorAction SilentlyContinue
-    if ($usuariosAD) {
-        foreach ($u in $usuariosAD) {
-            if ($u.SamAccountName -ne "Administrator" -and
-                $u.SamAccountName -ne "Guest"         -and
-                $u.SamAccountName -ne "krbtgt") {
-                Write-Host "  $($u.SamAccountName) -> $($u.Department)"
-            }
+    Print-Info "--- SMB ---"
+    if (Get-SmbShare -Name $script:SHARE_NAME -ErrorAction SilentlyContinue) {
+        Print-Ok "Share '$($script:SHARE_NAME)' activo."
+    } else { Print-Err "Share no encontrado." }
+
+    Print-Info "--- Cuotas FSRM ---"
+    $cuotas = Get-FsrmQuota -ErrorAction SilentlyContinue |
+              Where-Object { $_.Path -like "$($script:RUTA_PERFILES)\*" }
+    if ($cuotas) {
+        Print-Ok "$($cuotas.Count) cuotas activas"
+        foreach ($c in $cuotas) {
+            $usado  = [math]::Round($c.Usage / 1MB, 2)
+            $limite = [math]::Round($c.Size  / 1MB, 0)
+            Print-Info "  $($c.Path) -> $usado MB / $limite MB"
         }
-    } else {
-        Write-Host "  No hay usuarios creados aun"
+    } else { Print-Err "Sin cuotas." }
+
+    Print-Info "--- Apantallamientos ---"
+    $screens = Get-FsrmFileScreen -ErrorAction SilentlyContinue |
+               Where-Object { $_.Path -like "$($script:RUTA_PERFILES)\*" }
+    Print-Info "Apantallamientos activos: $($screens.Count)"
+
+    Print-Info "--- Prueba de cuota (6 MB en NoCuates) ---"
+    $testUser = (Get-ADGroupMember -Identity "NoCuates" | Select-Object -First 1).SamAccountName
+    if ($testUser) {
+        $testFile = "$($script:RUTA_PERFILES)\$testUser\test_6mb.bin"
+        try {
+            [System.IO.File]::WriteAllBytes($testFile, [byte[]](,0xFF * (6 * 1MB)))
+            Print-Warn "ALERTA: 6 MB se escribio, cuota NO funciona para $testUser."
+            Remove-Item $testFile -Force -ErrorAction SilentlyContinue
+        } catch {
+            Print-Ok "Cuota FUNCIONA: 6 MB BLOQUEADO en carpeta de $testUser."
+        }
     }
 
+    Print-Info "--- AppLocker ---"
+    $pol = Get-AppLockerPolicy -Effective -ErrorAction SilentlyContinue
+    if ($pol) { Print-Ok "Politica AppLocker cargada." }
+    else      { Print-Err "Sin politica AppLocker." }
+
+    $svc = Get-Service AppIDSvc -ErrorAction SilentlyContinue
+    if ($svc.Status -eq "Running") { Print-Ok "AppIDSvc corriendo." }
+    else { Print-Warn "AppIDSvc: $($svc.Status)" }
+
+    Print-Info "--- GPOs ---"
+    foreach ($gpo in @("GPO-Forzar-Logoff","GPO-AppLocker")) {
+        if (Get-GPO -Name $gpo -ErrorAction SilentlyContinue) { Print-Ok "GPO: $gpo" }
+        else { Print-Err "GPO falta: $gpo" }
+    }
+
+    Print-Info "--- Horarios ---"
+    $utc   = [DateTime]::UtcNow
+    $local = $utc.AddHours($script:UTC_OFFSET)
+    Print-Info "UTC: $($utc.ToString('HH:mm')) | Sinaloa: $($local.ToString('HH:mm'))"
+    Print-Info "Cuates:   08:00-15:00 local"
+    Print-Info "NoCuates: 15:00-02:00 local"
+
+    Print-Info "--- Eventos FSRM (ultima hora) ---"
+    $eventos = Get-WinEvent -LogName Application -ErrorAction SilentlyContinue |
+               Where-Object { $_.ProviderName -eq "SRMSVC" -and $_.TimeCreated -gt (Get-Date).AddMinutes(-60) }
+    if ($eventos) {
+        $eventos | Select-Object -First 10 | ForEach-Object {
+            Print-Info "  [$($_.TimeCreated.ToString('HH:mm:ss'))] $($_.Message.Substring(0,[Math]::Min(120,$_.Message.Length)))"
+        }
+    } else { Print-Warn "Sin eventos FSRM recientes." }
+
+    Write-Host "=============================================" -ForegroundColor Yellow
     Write-Host ""
-    Pausar
 }
