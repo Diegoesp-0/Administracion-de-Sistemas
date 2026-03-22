@@ -1,10 +1,10 @@
 #  VARIABLES GLOBALES
-$global:DOMINIO         = ""
-$global:NETBIOS         = ""
-$global:PASSWORD_ADMIN  = "Milaneza12345@"
-$global:RUTA_CSV = "$PSScriptRoot\..\..\Tarea 8 - Gobernanza, Cuotas y Control de Aplicaciones en Active Directory\Scripts\usuarios.csv"
-$global:RUTA_CARPETAS   = "C:\Usuarios"
-$global:IP_SERVIDOR     = ""
+$global:DOMINIO        = ""
+$global:NETBIOS        = ""
+$global:PASSWORD_ADMIN = "Milaneza12345@"
+$global:RUTA_CSV       = "$PSScriptRoot\..\..\Tarea 8 - Gobernanza, Cuotas y Control de Aplicaciones en Active Directory\Scripts\usuarios.csv"
+$global:RUTA_CARPETAS  = "C:\Usuarios"
+$global:IP_SERVIDOR    = ""
 
 #  UTILIDADES
 
@@ -71,13 +71,28 @@ function Pedir-Dominio {
         if (Validar-Dominio $entrada) {
             $netbios = ($entrada -split '\.')[0].ToUpper()
             if ($netbios.Length -gt 15) { $netbios = $netbios.Substring(0, 15) }
-            $global:DOMINIO  = $entrada
-            $global:NETBIOS  = $netbios
+            $global:DOMINIO = $entrada
+            $global:NETBIOS = $netbios
             Escribir-Ok "Dominio : $global:DOMINIO"
             Escribir-Ok "NetBIOS : $global:NETBIOS"
             return
         }
     }
+}
+
+function Cargar-Dominio {
+    if ([string]::IsNullOrEmpty($global:DOMINIO)) {
+        $ad = Get-ADDomain -ErrorAction SilentlyContinue
+        if ($ad) {
+            $global:DOMINIO = $ad.DNSRoot
+            $global:NETBIOS = $ad.NetBIOSName
+            Escribir-Info "Dominio cargado: $global:DOMINIO"
+        } else {
+            Escribir-Error "No se encontro ningun dominio configurado. Ejecuta primero la opcion 1."
+            return $false
+        }
+    }
+    return $true
 }
 
 #  ACTIVE DIRECTORY
@@ -150,6 +165,8 @@ function Crear-OUs {
     Clear-Host
     Escribir-Titulo "Creando Unidades"
 
+    if (-not (Cargar-Dominio)) { return }
+
     $base = "DC=" + ($global:DOMINIO -replace '\.', ',DC=')
 
     foreach ($ou in @("Cuates", "No Cuates")) {
@@ -166,6 +183,8 @@ function Crear-OUs {
 function Crear-Usuarios {
     Clear-Host
     Escribir-Titulo "Creando Usuarios desde CSV"
+
+    if (-not (Cargar-Dominio)) { return }
 
     if (-not (Test-Path $global:RUTA_CSV)) {
         Escribir-Error "No se encontro el archivo CSV en: $global:RUTA_CSV"
@@ -235,8 +254,7 @@ function Calcular-BytesHorario {
     $bytes = New-Object byte[] 21
 
     for ($hora = 0; $hora -lt 168; $hora++) {
-        $diaSemana = [math]::Floor($hora / 24)
-        $horaDia   = $hora % 24
+        $horaDia = $hora % 24
 
         $permitido = $false
         if ($horaFin -gt $horaInicio) {
@@ -258,6 +276,8 @@ function Calcular-BytesHorario {
 function Configurar-Horarios {
     Clear-Host
     Escribir-Titulo "Configurando Horarios de Acceso"
+
+    if (-not (Cargar-Dominio)) { return }
 
     $bytesCuates   = Calcular-BytesHorario -horaInicio 8  -horaFin 15
     $bytesNoCuates = Calcular-BytesHorario -horaInicio 15 -horaFin 2
@@ -287,6 +307,8 @@ function Configurar-Horarios {
 function Configurar-CierreSesion {
     Clear-Host
     Escribir-Titulo "Configurando GPO de Cierre de Sesion"
+
+    if (-not (Cargar-Dominio)) { return }
 
     $nombreGPO = "T8-CierreSesion"
 
@@ -350,25 +372,22 @@ function Configurar-Cuotas {
     Clear-Host
     Escribir-Titulo "Configurando Cuotas de Disco"
 
-    $plantilla5MB = "T8-Cuota-5MB"
+    Import-Module FileServerResourceManager -ErrorAction SilentlyContinue
+
+    $plantilla5MB  = "T8-Cuota-5MB"
+    $plantilla10MB = "T8-Cuota-10MB"
+
     $existe5 = Get-FsrmQuotaTemplate -Name $plantilla5MB -ErrorAction SilentlyContinue
     if (-not $existe5) {
-        New-FsrmQuotaTemplate `
-            -Name $plantilla5MB `
-            -Size 5MB `
-            -SoftLimit $false | Out-Null
+        New-FsrmQuotaTemplate -Name $plantilla5MB -Size 5MB | Out-Null
         Escribir-Ok "Plantilla '$plantilla5MB' creada"
     } else {
         Escribir-Info "Plantilla '$plantilla5MB' ya existe"
     }
 
-    $plantilla10MB = "T8-Cuota-10MB"
     $existe10 = Get-FsrmQuotaTemplate -Name $plantilla10MB -ErrorAction SilentlyContinue
     if (-not $existe10) {
-        New-FsrmQuotaTemplate `
-            -Name $plantilla10MB `
-            -Size 10MB `
-            -SoftLimit $false | Out-Null
+        New-FsrmQuotaTemplate -Name $plantilla10MB -Size 10MB | Out-Null
         Escribir-Ok "Plantilla '$plantilla10MB' creada"
     } else {
         Escribir-Info "Plantilla '$plantilla10MB' ya existe"
@@ -401,6 +420,8 @@ function Configurar-Cuotas {
 function Configurar-Apantallamiento {
     Clear-Host
     Escribir-Titulo "Configurando Apantallamiento de Archivos"
+
+    Import-Module FileServerResourceManager -ErrorAction SilentlyContinue
 
     $nombreGrupo = "T8-ArchivosProhibidos"
 
@@ -465,7 +486,6 @@ function Obtener-Hash-Notepad {
         Escribir-Error "No se encontro notepad.exe en $rutaNotepad"
         return $null
     }
-
     $info = Get-AppLockerFileInformation -Path $rutaNotepad
     return $info
 }
@@ -473,6 +493,8 @@ function Obtener-Hash-Notepad {
 function Configurar-AppLocker {
     Clear-Host
     Escribir-Titulo "Configurando AppLocker"
+
+    if (-not (Cargar-Dominio)) { return }
 
     Instalar-Dependencias-AppLocker
 
@@ -489,14 +511,20 @@ function Configurar-AppLocker {
     $sidCuates   = (Get-ADGroup -Filter "Name -eq 'Cuates'"    -ErrorAction SilentlyContinue).SID.Value
     $sidNoCuates = (Get-ADGroup -Filter "Name -eq 'No Cuates'" -ErrorAction SilentlyContinue).SID.Value
 
-    if (-not (Get-ADGroup -Filter "Name -eq 'Cuates'" -ErrorAction SilentlyContinue)) {
+    if (-not $sidCuates -or -not $sidNoCuates) {
         Clear-Host
         Escribir-Titulo "Creando Grupos de Seguridad"
 
         $base = "DC=" + ($global:DOMINIO -replace '\.', ',DC=')
-        New-ADGroup -Name "Cuates"    -GroupScope Global -Path "OU=Cuates,$base"    | Out-Null
-        New-ADGroup -Name "No Cuates" -GroupScope Global -Path "OU=No Cuates,$base" | Out-Null
-        Escribir-Ok "Grupos 'Cuates' y 'No Cuates' creados"
+
+        if (-not (Get-ADGroup -Filter "Name -eq 'Cuates'" -ErrorAction SilentlyContinue)) {
+            New-ADGroup -Name "Cuates" -GroupScope Global -Path "OU=Cuates,$base" | Out-Null
+            Escribir-Ok "Grupo 'Cuates' creado"
+        }
+        if (-not (Get-ADGroup -Filter "Name -eq 'No Cuates'" -ErrorAction SilentlyContinue)) {
+            New-ADGroup -Name "No Cuates" -GroupScope Global -Path "OU=No Cuates,$base" | Out-Null
+            Escribir-Ok "Grupo 'No Cuates' creado"
+        }
 
         $usuarios = Import-Csv -Path $global:RUTA_CSV
         foreach ($u in $usuarios) {
