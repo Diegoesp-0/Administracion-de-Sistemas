@@ -1,3 +1,9 @@
+# =============================================
+#  T8_Funciones.ps1
+#  Tarea 8 - Gobernanza, Cuotas y Control
+#  Windows Server 2022 Core
+# =============================================
+
 #  VARIABLES GLOBALES
 $global:DOMINIO        = ""
 $global:NETBIOS        = ""
@@ -80,6 +86,8 @@ function Pedir-Dominio {
     }
 }
 
+# Carga el dominio desde AD si la variable global esta vacia
+# Todas las funciones que necesiten el dominio deben llamar esto primero
 function Cargar-Dominio {
     if ([string]::IsNullOrEmpty($global:DOMINIO)) {
         $ad = Get-ADDomain -ErrorAction SilentlyContinue
@@ -88,7 +96,7 @@ function Cargar-Dominio {
             $global:NETBIOS = $ad.NetBIOSName
             Escribir-Info "Dominio cargado: $global:DOMINIO"
         } else {
-            Escribir-Error "No se encontro ningun dominio configurado. Ejecuta primero la opcion 1."
+            Escribir-Error "No se encontro ningun dominio. Ejecuta primero la opcion 1."
             return $false
         }
     }
@@ -279,8 +287,9 @@ function Configurar-Horarios {
 
     if (-not (Cargar-Dominio)) { return }
 
-    $bytesCuates   = Calcular-BytesHorario -horaInicio 8  -horaFin 15
-    $bytesNoCuates = Calcular-BytesHorario -horaInicio 15 -horaFin 2
+    # Cast explicito a [byte[]] — requerido por Set-ADUser
+    $bytesCuates   = [byte[]](Calcular-BytesHorario -horaInicio 8  -horaFin 15)
+    $bytesNoCuates = [byte[]](Calcular-BytesHorario -horaInicio 15 -horaFin 2)
 
     $usuarios = Import-Csv -Path $global:RUTA_CSV
 
@@ -288,18 +297,32 @@ function Configurar-Horarios {
         $nombre = $u.Nombre.Trim()
         $depto  = $u.Departamento.Trim()
 
-        $adUser = Get-ADUser -Filter "SamAccountName -eq '$nombre'" -ErrorAction SilentlyContinue
+        $adUser = Get-ADUser -Filter "SamAccountName -eq '$nombre'" -Properties logonHours -ErrorAction SilentlyContinue
         if (-not $adUser) {
             Escribir-Error "Usuario '$nombre' no encontrado en AD"
             continue
         }
 
-        if ($depto -eq "Cuates") {
-            Set-ADUser -Identity $nombre -Replace @{logonHours = $bytesCuates}
-            Escribir-Ok "'$nombre' - Horario Cuates (8:00 AM - 3:00 PM)"
-        } else {
-            Set-ADUser -Identity $nombre -Replace @{logonHours = $bytesNoCuates}
-            Escribir-Ok "'$nombre' - Horario No Cuates (3:00 PM - 2:00 AM)"
+        try {
+            if ($depto -eq "Cuates") {
+                $bytes = $bytesCuates
+            } else {
+                $bytes = $bytesNoCuates
+            }
+
+            # Si ya tiene logonHours limpiar primero, luego agregar
+            if ($adUser.logonHours) {
+                Set-ADUser -Identity $nombre -Clear logonHours
+            }
+            Set-ADUser -Identity $nombre -Add @{logonHours = [byte[]]$bytes}
+
+            if ($depto -eq "Cuates") {
+                Escribir-Ok "'$nombre' - Horario Cuates (8:00 AM - 3:00 PM)"
+            } else {
+                Escribir-Ok "'$nombre' - Horario No Cuates (3:00 PM - 2:00 AM)"
+            }
+        } catch {
+            Escribir-Error "Error aplicando horario a '$nombre': $_"
         }
     }
 }
