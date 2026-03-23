@@ -494,19 +494,17 @@ function verificar {
 function menuPrincipal {
     do {
         Clear-Host
-        Write-Host "-----------------------------------------------" -ForegroundColor Yellow
-        Write-Host "   Gobernanza, Cuotas y Control de             " -ForegroundColor Red
-        Write-Host "   Aplicaciones en Active Directory            " -ForegroundColor Red
-        Write-Host "   v3 - UTC corregido para Sinaloa (UTC-7)    " -ForegroundColor DarkGray
-        Write-Host "-----------------------------------------------" -ForegroundColor Yellow
-        Write-Host "  1. Inicializar entorno  (solo una vez)"
+        Write-Host "-----------------------------------------------"
+        Write-Host "   Gobernanza, Cuotas y Control de Aplicaciones"
+        Write-Host "-----------------------------------------------"
+        Write-Host "  1. Inicializar entorno"
         Write-Host "  2. Crear UOs, grupos y usuarios desde CSV"
-        Write-Host "  3. Configurar horarios de sesion (LogonHours)"
+        Write-Host "  3. Configurar horarios de sesion"
         Write-Host "  4. Configurar FSRM (cuotas + apantallamiento)"
         Write-Host "  5. Configurar AppLocker"
         Write-Host "  6. Verificar entorno"
         Write-Host "  7. Salir"
-        Write-Host "-----------------------------------------------" -ForegroundColor Yellow
+        Write-Host "-----------------------------------------------"
 
         $op = Read-Host "Selecciona una opcion"
 
