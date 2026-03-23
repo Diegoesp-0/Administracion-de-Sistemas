@@ -1,11 +1,11 @@
-Nombre,Password,Departamento
-usuario1,Milaneza12345@,Cuates
-usuario2,Milaneza12345@,Cuates
-usuario3,Milaneza12345@,Cuates
-usuario4,Milaneza12345@,Cuates
-usuario5,Milaneza12345@,Cuates
-usuario6,Milaneza12345@,No Cuates
-usuario7,Milaneza12345@,No Cuates
-usuario8,Milaneza12345@,No Cuates
-usuario9,Milaneza12345@,No Cuates
-usuario10,Milaneza12345@,No Cuates
+Nombre,Apellido,Usuario,Departamento
+Diego,1,usuario1,Cuates
+Manuel,2,usuario2,Cuates
+Espiritu,3,usuario3,Cuates
+Manzanarez,4,usuario4,Cuates
+Sergio,5,usuario5,Cuates
+Rivera,6,usuario6,NoCuates
+Camacho,7,usuario7,NoCuates
+Daniel,8,usuario8,NoCuates
+Leyva,9,usuario9,NoCuates
+Chavez,10,usuario10,NoCuates
