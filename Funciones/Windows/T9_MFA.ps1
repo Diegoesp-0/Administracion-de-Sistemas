@@ -27,20 +27,15 @@ function Generar-ClaveTOTP {
 
 
 function Registrar-Usuario-Token {
-    param(
-        [string]$Sam
-    )
+    param([string]$Sam)
 
     $clave = Generar-ClaveTOTP
-
     & $MULTIOTP_EXE -createga $Sam $clave | Out-Null
 
     if ($LASTEXITCODE -eq 11) {
-        # Creado exitosamente
         & $MULTIOTP_EXE -set $Sam prefix-pin=0 | Out-Null
         Print-Ok "  $Sam registrado"
 
-        # Guardar clave en archivo
         "Usuario: $Sam"                              | Out-File $RUTA_CLAVES -Append -Encoding UTF8
         "  Nombre en GA: $Sam@$DOMINIO_MFA"          | Out-File $RUTA_CLAVES -Append -Encoding UTF8
         "  Clave:        $clave"                     | Out-File $RUTA_CLAVES -Append -Encoding UTF8
@@ -88,10 +83,54 @@ function Instalar-MultiOTP {
 
 function Habilitar-RDP {
     Print-Info "Habilitando RDP..."
+
     Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
         -Name "fDenyTSConnections" -Value 0
+
+    # Abrir firewall
     Enable-NetFirewallRule -DisplayGroup "Escritorio remoto" -ErrorAction SilentlyContinue
+
     Print-Ok "RDP habilitado."
+}
+
+
+function Configurar-PermisosRDP {
+    Print-Info "Configurando permisos RDP para usuarios delegados..."
+
+    try {
+        Add-ADGroupMember -Identity "Usuarios de escritorio remoto" -Members $ADMINS_MFA -ErrorAction Stop
+        Print-Ok "Admins agregados al grupo Usuarios de escritorio remoto."
+    } catch {
+        Print-Warn "Algunos admins ya estaban en el grupo (se omite)."
+    }
+
+    foreach ($admin in $ADMINS_MFA) {
+        net localgroup "Usuarios de escritorio remoto" "EMPRESA\$admin" /add 2>$null | Out-Null
+    }
+
+    $secpolPath = "C:\secpol_mfa.txt"
+    $sdbPath    = "C:\secpol_mfa.sdb"
+
+    secedit /export /cfg $secpolPath | Out-Null
+
+    $content = Get-Content $secpolPath
+
+    # Verificar si ya tiene el SID agregado
+    if ($content -like "*S-1-5-32-555*") {
+        Print-Warn "Politica de inicio de sesion remoto ya configurada (se omite)."
+    } else {
+        $content = $content -replace `
+            "SeRemoteInteractiveLogonRight = \*S-1-5-32-544", `
+            "SeRemoteInteractiveLogonRight = *S-1-5-32-544,*S-1-5-32-555"
+
+        $content | Set-Content $secpolPath
+        secedit /configure /db $sdbPath /cfg $secpolPath /quiet | Out-Null
+        Print-Ok "Politica de inicio de sesion remoto configurada."
+    }
+
+    # Limpiar archivos temporales
+    Remove-Item $secpolPath -ErrorAction SilentlyContinue
+    Remove-Item $sdbPath    -ErrorAction SilentlyContinue
 }
 
 
@@ -125,6 +164,7 @@ function Registrar-Usuarios-MFA {
     "  Abre Google Authenticator -> + -> Ingresar clave -> Tipo: Basada en tiempo" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
     "" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
 
+    # Registrar 4 admins
     Write-Host ""
     Print-Info "Registrando administradores..."
     foreach ($sam in $ADMINS_MFA) {
@@ -159,6 +199,8 @@ function Configurar-MFA {
     Instalar-MultiOTP
     Write-Host ""
     Habilitar-RDP
+    Write-Host ""
+    Configurar-PermisosRDP
     Write-Host ""
     Configurar-MultiOTP
     Write-Host ""
