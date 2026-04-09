@@ -26,6 +26,34 @@ function Generar-ClaveTOTP {
 }
 
 
+function Registrar-Usuario-Token {
+    param(
+        [string]$Sam
+    )
+
+    $clave = Generar-ClaveTOTP
+
+    & $MULTIOTP_EXE -createga $Sam $clave | Out-Null
+
+    if ($LASTEXITCODE -eq 11) {
+        # Creado exitosamente
+        & $MULTIOTP_EXE -set $Sam prefix-pin=0 | Out-Null
+        Print-Ok "  $Sam registrado"
+
+        # Guardar clave en archivo
+        "Usuario: $Sam"                              | Out-File $RUTA_CLAVES -Append -Encoding UTF8
+        "  Nombre en GA: $Sam@$DOMINIO_MFA"          | Out-File $RUTA_CLAVES -Append -Encoding UTF8
+        "  Clave:        $clave"                     | Out-File $RUTA_CLAVES -Append -Encoding UTF8
+        ""                                           | Out-File $RUTA_CLAVES -Append -Encoding UTF8
+
+    } elseif ($LASTEXITCODE -eq 22) {
+        Print-Warn "  $Sam ya registrado en multiOTP (se omite)"
+    } else {
+        Print-Err "  Error al registrar $Sam (codigo: $LASTEXITCODE)"
+    }
+}
+
+
 function Instalar-MultiOTP {
     Print-Info "Verificando instalacion de multiOTP..."
 
@@ -75,7 +103,7 @@ function Configurar-MultiOTP {
         return
     }
 
-    & $MULTIOTP_EXE -config max-block-failures=3      | Out-Null
+    & $MULTIOTP_EXE -config max-block-failures=3       | Out-Null
     & $MULTIOTP_EXE -config failure-delayed-time=1800  | Out-Null
     Print-Ok "Lockout: 3 intentos fallidos, bloqueo 30 minutos."
 
@@ -90,60 +118,25 @@ function Configurar-MultiOTP {
 function Registrar-Usuarios-MFA {
     Print-Info "Registrando usuarios en multiOTP..."
 
-    # Limpiar archivo de claves anterior
     "========== Claves MFA - $DOMINIO_MFA ==========" | Out-File $RUTA_CLAVES -Encoding UTF8
     "Generado: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
     "" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
-    "Agrega cada clave en Google Authenticator:" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
+    "Instrucciones:" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
     "  Abre Google Authenticator -> + -> Ingresar clave -> Tipo: Basada en tiempo" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
     "" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
 
-    # Registrar admins hardcodeados
     Write-Host ""
     Print-Info "Registrando administradores..."
-
     foreach ($sam in $ADMINS_MFA) {
-        $info = & $MULTIOTP_EXE -user-info $sam 2>&1
-        if ($info -notlike "*doesn't exist*") {
-            Print-Warn "  $sam ya registrado (se omite)"
-            continue
-        }
-
-        $clave = Generar-ClaveTOTP
-        & $MULTIOTP_EXE -createga $sam $clave | Out-Null
-        & $MULTIOTP_EXE -set $sam prefix-pin=0 | Out-Null
-
-        Print-Ok "  $sam registrado"
-
-        "Usuario: $sam" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
-        "  Nombre en GA: $sam@$DOMINIO_MFA" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
-        "  Clave:        $clave" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
-        "" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
+        Registrar-Usuario-Token -Sam $sam
     }
 
-    # Registrar usuarios del CSV
     if (Test-Path $CSV_USUARIOS) {
         Write-Host ""
         Print-Info "Registrando usuarios del CSV..."
         $usuarios = Import-Csv $CSV_USUARIOS
-
         foreach ($u in $usuarios) {
-            $info = & $MULTIOTP_EXE -user-info $u.Usuario 2>&1
-            if ($info -notlike "*doesn't exist*") {
-                Print-Warn "  $($u.Usuario) ya registrado (se omite)"
-                continue
-            }
-
-            $clave = Generar-ClaveTOTP
-            & $MULTIOTP_EXE -createga $u.Usuario $clave | Out-Null
-            & $MULTIOTP_EXE -set $u.Usuario prefix-pin=0 | Out-Null
-
-            Print-Ok "  $($u.Usuario) registrado"
-
-            "Usuario: $($u.Usuario)" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
-            "  Nombre en GA: $($u.Usuario)@$DOMINIO_MFA" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
-            "  Clave:        $clave" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
-            "" | Out-File $RUTA_CLAVES -Append -Encoding UTF8
+            Registrar-Usuario-Token -Sam $u.Usuario
         }
     } else {
         Print-Warn "CSV no encontrado, solo se registraron los admins."
