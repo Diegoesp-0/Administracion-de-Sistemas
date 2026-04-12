@@ -7,6 +7,7 @@ $RUTA_CLAVES   = "C:\Users\Administrador\claves_mfa.txt"
 $DOMINIO_MFA   = "empresa.local"
 
 $ADMINS_MFA = @(
+    "Administrador",
     "admin_identidad",
     "admin_storage",
     "admin_politicas",
