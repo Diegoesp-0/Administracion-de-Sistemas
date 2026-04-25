@@ -10,31 +10,10 @@ source "$FUNCIONES/docker_volumenes.sh"
 source "$FUNCIONES/docker_web.sh"
 source "$FUNCIONES/docker_db.sh"
 source "$FUNCIONES/docker_ftp.sh"
-
-pedir_credenciales() {
-    print_titulo "Configuracion de credenciales"
-
-    read -p "  Usuario PostgreSQL [admin]: " PG_USER
-    PG_USER="${PG_USER:-admin}"
-
-    read -s -p "  Contraseña PostgreSQL: " PG_PASS
-    echo ""
-
-    read -p "  Nombre base de datos [tarea10]: " PG_DB
-    PG_DB="${PG_DB:-tarea10}"
-
-    read -p "  Usuario FTP [ftpuser]: " FTP_USER
-    FTP_USER="${FTP_USER:-ftpuser}"
-
-    read -s -p "  Contraseña FTP: " FTP_PASS
-    echo ""
-
-    export PG_USER PG_PASS PG_DB FTP_USER FTP_PASS
-}
+source "$SCRIPT_DIR/.env"
 
 instalar() {
     print_titulo "Instalacion completa"
-    pedir_credenciales
     instalar_docker
     crear_red
     crear_volumenes
@@ -72,8 +51,8 @@ iniciar() {
 
 resetear() {
     print_titulo "Reseteo completo"
-    print_info "[INFO] Esto eliminará contenedores, red y volúmenes"
-    read -p "  ¿Estás seguro? (s/N): " confirm
+    print_info "[INFO] Esto eliminara contenedores, red y volumenes"
+    read -p "  Estas seguro? (s/N): " confirm
     if [[ "$confirm" =~ ^[sS]$ ]]; then
         eliminar_ftp
         eliminar_web
@@ -82,7 +61,7 @@ resetear() {
         eliminar_volumenes
         print_completado "[OK] Reset completado"
     else
-        print_info "[INFO] Operación cancelada"
+        print_info "[INFO] Operacion cancelada"
     fi
 }
 
@@ -92,7 +71,7 @@ ayuda() {
     echo -e "  ${verde}-v${nc}   Verificar estado de contenedores y recursos"
     echo -e "  ${verde}-s${nc}   Detener todos los contenedores"
     echo -e "  ${verde}-u${nc}   Iniciar contenedores detenidos"
-    echo -e "  ${verde}-r${nc}   Resetear todo (elimina contenedores y volúmenes)"
+    echo -e "  ${verde}-r${nc}   Resetear todo (elimina contenedores y volumenes)"
     echo -e "  ${verde}-h${nc}   Mostrar esta ayuda"
     echo ""
 }
@@ -110,6 +89,6 @@ while getopts "ivsuhr" opt; do
         u) iniciar ;;
         r) resetear ;;
         h) ayuda ;;
-        *) print_error "[ERROR] Opción inválida. Usa -h para ver la ayuda" ; exit 1 ;;
+        *) print_error "[ERROR] Opcion invalida. Usa -h para ver la ayuda" ; exit 1 ;;
     esac
 done
