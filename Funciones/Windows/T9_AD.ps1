@@ -44,6 +44,39 @@ function Inicializar-Entorno {
     Print-Warn "El servidor se reiniciara. Ejecuta el script de nuevo y elige opcion 2."
 }
 
+function Configurar-PerfilesMoviles {
+    Print-Info "Configurando perfiles moviles..."
+
+    if (-not (Test-Path "C:\Perfiles")) {
+        New-Item -Path "C:\Perfiles" -ItemType Directory -Force | Out-Null
+        Print-Ok "Carpeta C:\Perfiles creada."
+    }
+
+    icacls "C:\Perfiles" /grant "Usuarios del dominio:(OI)(CI)F" /T | Out-Null
+    Print-Ok "Permisos NTFS configurados en C:\Perfiles."
+
+    $share = Get-SmbShare -Name "Perfiles" -ErrorAction SilentlyContinue
+    if (-not $share) {
+        New-SmbShare -Name "Perfiles" -Path "C:\Perfiles" -FullAccess "Todos" | Out-Null
+        Print-Ok "Carpeta compartida como \\$env:COMPUTERNAME\Perfiles"
+    } else {
+        Print-Warn "Compartido 'Perfiles' ya existe (se omite)."
+    }
+
+    $usuarios = @("dleyva")
+    if (Test-Path $CSV_USUARIOS) {
+        $usuarios += (Import-Csv $CSV_USUARIOS).Usuario
+    }
+
+    foreach ($sam in $usuarios) {
+        $existe = Get-ADUser -Filter "SamAccountName -eq '$sam'" -ErrorAction SilentlyContinue
+        if ($existe) {
+            Set-ADUser -Identity $sam -ProfilePath "\\$env:COMPUTERNAME\Perfiles\$sam"
+            Print-Ok "  $sam - perfil movil asignado."
+        }
+    }
+}
+
 
 function Crear-OUs {
     Print-Info "Verificando Unidades Organizativas..."
@@ -157,6 +190,11 @@ function Configurar-AD {
     Habilitar-RDP-Usuarios
 
     Write-Host ""
+    Configurar-PerfilesMoviles
+    
+    Write-Host ""
     Print-Ok "Active Directory configurado correctamente."
     Write-Host ""
+
+    
 }
