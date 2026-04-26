@@ -21,6 +21,7 @@ iniciar_ftp() {
             --memory 512m \
             --cpus 0.5 \
             --restart always \
+            --security-opt seccomp:unconfined \
             -p 21:21 \
             -p 21100-21110:21100-21110 \
             -e FTP_USER="$FTP_USER" \
