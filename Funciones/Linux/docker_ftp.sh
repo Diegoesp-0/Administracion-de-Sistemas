@@ -23,6 +23,7 @@ iniciar_ftp() {
             -p 21:21 \
             -p 21000-21010:21000-21010 \
             -e USERS="$FTP_USER|$FTP_PASS|/ftp/$FTP_USER" \
+            -e ADDRESS="$(ip -4 addr show enp0s9 | awk '/inet /{split($2,a,"/"); print a[1]; exit}')" \
             -e MIN_PORT=21000 \
             -e MAX_PORT=21010 \
             delfer/alpine-ftp-server &>/dev/null

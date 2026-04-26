@@ -40,8 +40,7 @@ iniciar_db() {
 configurar_backup_db() {
     print_info "[INFO] Configurando respaldo automatico de PostgreSQL..."
 
-    sudo mkdir -p "$BACKUP_DIR" &>/dev/null
-    sudo chmod 777 "$BACKUP_DIR" &>/dev/null
+    sudo install -d -m 750 "$BACKUP_DIR" &>/dev/null
 
     BACKUP_SCRIPT="/usr/local/bin/backup_db.sh"
     sudo tee "$BACKUP_SCRIPT" > /dev/null << EOF
@@ -61,10 +60,8 @@ EOF
 
 hacer_backup_db() {
     print_info "[INFO] Ejecutando respaldo manual de PostgreSQL..."
-    sudo mkdir -p "$BACKUP_DIR" &>/dev/null
     FECHA=$(date +%Y%m%d_%H%M%S)
-    docker exec db_server pg_dump -U "$PG_USER" "$PG_DB" > "$BACKUP_DIR/backup_$FECHA.sql" 2>/dev/null
-    if [ $? -eq 0 ]; then
+    if docker exec db_server pg_dump -U "$PG_USER" "$PG_DB" > "$BACKUP_DIR/backup_$FECHA.sql" 2>/dev/null; then
         print_completado "[OK] Respaldo guardado: $BACKUP_DIR/backup_$FECHA.sql"
     else
         print_error "[ERROR] No se pudo generar el respaldo"

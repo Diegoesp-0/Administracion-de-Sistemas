@@ -20,16 +20,15 @@ verificar_cron() {
     print_info "[INFO] Verificando cron..."
     if command -v crontab &>/dev/null; then
         print_completado "[OK] Cron ya esta instalado"
+        return
+    fi
+    print_info "[INFO] Instalando cronie..."
+    if sudo zypper install -y cronie &>/dev/null; then
+        sudo systemctl enable cron &>/dev/null
+        sudo systemctl start cron &>/dev/null
+        print_completado "[OK] Cronie instalado y activo"
     else
-        print_info "[INFO] Instalando cronie..."
-        sudo zypper install -y cronie &>/dev/null
-        if [ $? -eq 0 ]; then
-            sudo systemctl enable cron &>/dev/null
-            sudo systemctl start cron &>/dev/null
-            print_completado "[OK] Cronie instalado y activo"
-        else
-            print_error "[ERROR] No se pudo instalar cronie"
-        fi
+        print_error "[ERROR] No se pudo instalar cronie"
     fi
 }
 
@@ -65,9 +64,7 @@ verificar_grupo_docker() {
 abrir_puertos_firewall() {
     print_info "[INFO] Configurando firewall..."
     if command -v firewall-cmd &>/dev/null; then
-        sudo firewall-cmd --permanent --add-port=8080/tcp &>/dev/null
-        sudo firewall-cmd --permanent --add-port=21/tcp &>/dev/null
-        sudo firewall-cmd --permanent --add-port=21000-21010/tcp &>/dev/null
+        sudo firewall-cmd --permanent --add-port=8080/tcp --add-port=21/tcp --add-port=21000-21010/tcp &>/dev/null
         sudo firewall-cmd --reload &>/dev/null
         print_completado "[OK] Puertos abiertos en firewall: 8080, 21, 21000-21010"
     else
