@@ -13,7 +13,6 @@ iniciar_ftp() {
         docker start ftp_server &>/dev/null
     else
         print_info "[INFO] Creando contenedor ftp_server..."
-        HOST_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
         docker run -d \
             --name ftp_server \
             --network infra_red \
@@ -22,11 +21,8 @@ iniciar_ftp() {
             --cpus 0.5 \
             --restart always \
             -p 21:21 \
-            -p 40000-40009:40000-40009 \
+            -p 21000-21010:21000-21010 \
             -e USERS="$FTP_USER|$FTP_PASS|/ftp/$FTP_USER" \
-            -e ADDRESS="$HOST_IP" \
-            -e MIN_PORT=40000 \
-            -e MAX_PORT=40009 \
             delfer/alpine-ftp-server &>/dev/null
     fi
 
