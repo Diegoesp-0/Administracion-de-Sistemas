@@ -67,9 +67,9 @@ abrir_puertos_firewall() {
     if command -v firewall-cmd &>/dev/null; then
         sudo firewall-cmd --permanent --add-port=8080/tcp &>/dev/null
         sudo firewall-cmd --permanent --add-port=21/tcp &>/dev/null
-        sudo firewall-cmd --permanent --add-port=21100-21110/tcp &>/dev/null
+        sudo firewall-cmd --permanent --add-port=21000-21010/tcp &>/dev/null
         sudo firewall-cmd --reload &>/dev/null
-        print_completado "[OK] Puertos abiertos en firewall: 8080, 21, 21100-21110"
+        print_completado "[OK] Puertos abiertos en firewall: 8080, 21, 21000-21010"
     else
         print_info "[INFO] firewalld no encontrado, omitiendo configuracion de firewall"
     fi
