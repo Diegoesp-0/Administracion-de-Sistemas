@@ -10,7 +10,7 @@ source "$FUNCIONES/docker_volumenes.sh"
 source "$FUNCIONES/docker_web.sh"
 source "$FUNCIONES/docker_db.sh"
 source "$FUNCIONES/docker_ftp.sh"
-source "$SCRIPT_DIR/.env"
+source "$SCRIPT_DIR/claves.txt"
 
 instalar() {
     print_titulo "Instalacion completa"
