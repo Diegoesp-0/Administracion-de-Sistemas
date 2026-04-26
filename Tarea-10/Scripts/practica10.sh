@@ -71,6 +71,7 @@ ayuda() {
     echo -e "  ${verde}-v${nc}   Verificar estado de contenedores y recursos"
     echo -e "  ${verde}-s${nc}   Detener todos los contenedores"
     echo -e "  ${verde}-u${nc}   Iniciar contenedores detenidos"
+    echo -e "  ${verde}-b${nc}   Generar respaldo manual de la base de datos"
     echo -e "  ${verde}-r${nc}   Resetear todo (elimina contenedores y volumenes)"
     echo -e "  ${verde}-h${nc}   Mostrar esta ayuda"
     echo ""
@@ -81,12 +82,13 @@ if [ $# -eq 0 ]; then
     exit 0
 fi
 
-while getopts "ivsuhr" opt; do
+while getopts "ivsubhr" opt; do
     case $opt in
         i) instalar ;;
         v) verificar ;;
         s) detener ;;
         u) iniciar ;;
+        b) hacer_backup_db ;;
         r) resetear ;;
         h) ayuda ;;
         *) print_error "[ERROR] Opcion invalida. Usa -h para ver la ayuda" ; exit 1 ;;

@@ -2,6 +2,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WEB_DIR="$(realpath "$SCRIPT_DIR/../../Tarea-10/Scripts/web")"
+DOCKERFILE="$(realpath "$SCRIPT_DIR/../../Tarea-10/Scripts/Dockerfile")"
 
 construir_imagen_web() {
     print_info "[INFO] Verificando imagen web_server_img..."
@@ -10,7 +11,7 @@ construir_imagen_web() {
         print_completado "[OK] Imagen web_server_img ya existe"
     else
         print_info "[INFO] Construyendo imagen web_server_img..."
-        docker build -t web_server_img "$WEB_DIR" &>/dev/null
+        docker build -f "$DOCKERFILE" -t web_server_img "$WEB_DIR" &>/dev/null
         if [ $? -eq 0 ]; then
             print_completado "[OK] Imagen web_server_img construida"
         else

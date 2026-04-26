@@ -45,8 +45,22 @@ verificar_grupo_docker() {
     fi
 }
 
+abrir_puertos_firewall() {
+    print_info "[INFO] Configurando firewall..."
+    if command -v firewall-cmd &>/dev/null; then
+        sudo firewall-cmd --permanent --add-port=8080/tcp &>/dev/null
+        sudo firewall-cmd --permanent --add-port=21/tcp &>/dev/null
+        sudo firewall-cmd --permanent --add-port=40000-40009/tcp &>/dev/null
+        sudo firewall-cmd --reload &>/dev/null
+        print_completado "[OK] Puertos abiertos en firewall: 8080, 21, 40000-40009"
+    else
+        print_info "[INFO] firewalld no encontrado, omitiendo configuracion de firewall"
+    fi
+}
+
 instalar_docker() {
     verificar_docker
     verificar_servicio_docker
     verificar_grupo_docker
+    abrir_puertos_firewall
 }

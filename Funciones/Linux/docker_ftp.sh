@@ -13,6 +13,7 @@ iniciar_ftp() {
         docker start ftp_server &>/dev/null
     else
         print_info "[INFO] Creando contenedor ftp_server..."
+        HOST_IP=$(hostname -I | awk '{print $1}')
         docker run -d \
             --name ftp_server \
             --network infra_red \
@@ -24,6 +25,9 @@ iniciar_ftp() {
             -p 40000-40009:40000-40009 \
             -e FTP_USER="$FTP_USER" \
             -e FTP_PASS="$FTP_PASS" \
+            -e PASV_ADDRESS="$HOST_IP" \
+            -e PASV_MIN_PORT=40000 \
+            -e PASV_MAX_PORT=40009 \
             garethflowers/ftp-server &>/dev/null
     fi
 
