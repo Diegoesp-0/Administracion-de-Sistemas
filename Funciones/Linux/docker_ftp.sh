@@ -17,18 +17,17 @@ iniciar_ftp() {
         docker run -d \
             --name ftp_server \
             --network infra_red \
-            --volume web_content:/home/ftpuser \
+            --volume web_content:/ftp/$FTP_USER \
             --memory 512m \
             --cpus 0.5 \
             --restart always \
             -p 21:21 \
             -p 40000-40009:40000-40009 \
-            -e FTP_USER="$FTP_USER" \
-            -e FTP_PASS="$FTP_PASS" \
+            -e USERS="$FTP_USER|$FTP_PASS|/ftp/$FTP_USER" \
             -e PASV_ADDRESS="$HOST_IP" \
-            -e PASV_MIN_PORT=40000 \
-            -e PASV_MAX_PORT=40009 \
-            garethflowers/ftp-server &>/dev/null
+            -e PASV_MIN=40000 \
+            -e PASV_MAX=40009 \
+            delfer/alpine-ftp-server &>/dev/null
     fi
 
     if [ $? -eq 0 ]; then
