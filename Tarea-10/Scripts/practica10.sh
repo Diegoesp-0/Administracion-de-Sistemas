@@ -1,8 +1,9 @@
 #!/bin/bash
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FUNCIONES="$SCRIPT_DIR/../../Funciones/Linux"
+MAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FUNCIONES="$MAIN_DIR/../../Funciones/Linux"
 
+source "$MAIN_DIR/claves.txt"
 source "$FUNCIONES/colores.sh"
 source "$FUNCIONES/docker_install.sh"
 source "$FUNCIONES/docker_network.sh"
@@ -10,7 +11,6 @@ source "$FUNCIONES/docker_volumenes.sh"
 source "$FUNCIONES/docker_web.sh"
 source "$FUNCIONES/docker_db.sh"
 source "$FUNCIONES/docker_ftp.sh"
-source "$SCRIPT_DIR/claves.txt"
 
 instalar() {
     print_titulo "Instalacion completa"
