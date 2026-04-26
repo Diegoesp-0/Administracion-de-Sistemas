@@ -28,6 +28,7 @@ iniciar_ftp() {
             -e PASV_ADDRESS="$HOST_IP" \
             -e PASV_MIN_PORT=21100 \
             -e PASV_MAX_PORT=21110 \
+            -e LOCAL_UMASK=022 \
             -e LOG_STDOUT=YES \
             fauria/vsftpd &>/dev/null
     fi
