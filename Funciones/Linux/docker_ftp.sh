@@ -13,17 +13,23 @@ iniciar_ftp() {
         docker start ftp_server &>/dev/null
     else
         print_info "[INFO] Creando contenedor ftp_server..."
+        HOST_IP=$(ip -4 addr show "$(ip route show default | head -1 | awk '{print $5}')" | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
         docker run -d \
             --name ftp_server \
             --network infra_red \
-            --volume web_content:/ftp/$FTP_USER \
+            --volume web_content:/home/vsftpd/$FTP_USER \
             --memory 512m \
             --cpus 0.5 \
             --restart always \
             -p 21:21 \
-            -p 21000-21010:21000-21010 \
-            -e USERS="$FTP_USER|$FTP_PASS|/ftp/$FTP_USER" \
-            delfer/alpine-ftp-server &>/dev/null
+            -p 21100-21110:21100-21110 \
+            -e FTP_USER="$FTP_USER" \
+            -e FTP_PASS="$FTP_PASS" \
+            -e PASV_ADDRESS="$HOST_IP" \
+            -e PASV_MIN_PORT=21100 \
+            -e PASV_MAX_PORT=21110 \
+            -e LOG_STDOUT=YES \
+            fauria/vsftpd &>/dev/null
     fi
 
     if [ $? -eq 0 ]; then
