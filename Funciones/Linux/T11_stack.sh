@@ -15,7 +15,7 @@ levantar_stack() {
     fi
 
     print_info "[INFO] Descargando imagenes y levantando contenedores..."
-    docker compose -f "$dir/docker-compose.yml" --env-file "$dir/.env" up -d
+    $COMPOSE_CMD -f "$dir/docker-compose.yml" --env-file "$dir/.env" up -d
 
     if [ $? -eq 0 ]; then
         print_completado "[OK] Stack levantado"
@@ -40,7 +40,7 @@ levantar_stack() {
 estado_stack() {
     local dir="$1"
     print_titulo "Estado del stack"
-    docker compose -f "$dir/docker-compose.yml" ps
+    $COMPOSE_CMD -f "$dir/docker-compose.yml" ps
     echo ""
     print_info "[INFO] Redes activas:"
     docker network ls | grep t11
@@ -56,13 +56,13 @@ estado_stack() {
 detener_stack() {
     local dir="$1"
     print_info "[INFO] Deteniendo stack (los datos se conservan)..."
-    docker compose -f "$dir/docker-compose.yml" down
+    $COMPOSE_CMD -f "$dir/docker-compose.yml" down
     print_completado "[OK] Stack detenido"
 }
 
 resetear_stack() {
     local dir="$1"
     print_info "[INFO] Eliminando contenedores y volumenes..."
-    docker compose -f "$dir/docker-compose.yml" down -v
+    $COMPOSE_CMD -f "$dir/docker-compose.yml" down -v
     print_completado "[OK] Stack y volumenes eliminados"
 }

@@ -2,13 +2,23 @@
 
 verificar_docker_compose() {
     print_info "[INFO] Verificando Docker Compose..."
+
     if docker compose version &>/dev/null; then
-        print_completado "[OK] Docker Compose disponible: $(docker compose version --short 2>/dev/null)"
+        print_completado "[OK] Docker Compose plugin disponible: $(docker compose version --short 2>/dev/null)"
+        COMPOSE_CMD="docker compose"
         return
     fi
-    print_info "[INFO] Instalando docker-compose-plugin..."
-    if sudo zypper install -y docker-compose-plugin &>/dev/null; then
-        print_completado "[OK] Docker Compose instalado"
+
+    if command -v docker-compose &>/dev/null; then
+        print_completado "[OK] docker-compose standalone disponible: $(docker-compose --version 2>/dev/null)"
+        COMPOSE_CMD="docker-compose"
+        return
+    fi
+
+    print_info "[INFO] Instalando docker-compose..."
+    if sudo zypper install -y docker-compose &>/dev/null; then
+        print_completado "[OK] docker-compose instalado"
+        COMPOSE_CMD="docker-compose"
     else
         print_error "[ERROR] No se pudo instalar Docker Compose"
         exit 1
