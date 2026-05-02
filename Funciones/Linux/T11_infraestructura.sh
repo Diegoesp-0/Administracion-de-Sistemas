@@ -67,6 +67,7 @@ http {
     }
 }
 EOF
+    chmod 644 "$conf_file"
     print_completado "[OK] nginx.conf creado"
 }
 
@@ -75,6 +76,7 @@ crear_html_app() {
     local html_dir="$dir/html"
 
     mkdir -p "$html_dir"
+    chmod 755 "$html_dir"
 
     if [ -f "$html_dir/index.html" ]; then
         print_completado "[OK] HTML de app interna ya existe"
@@ -134,6 +136,7 @@ crear_html_app() {
 </body>
 </html>
 EOF
+    chmod 644 "$html_dir/index.html"
     print_completado "[OK] Pagina de app interna creada"
 }
 
