@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Archivos montados en contenedores van a /opt/t11/ (world-accessible)
+# .env y docker-compose.yml se quedan en el directorio del repo (los lee el host)
+DOCKER_ASSETS="/opt/t11"
+
 crear_env() {
     local dir="$1"
     local env_file="$dir/.env"
@@ -29,16 +33,18 @@ EOF
 }
 
 crear_nginx_conf() {
-    local dir="$1"
-    local conf_file="$dir/nginx.conf"
+    local conf_file="$DOCKER_ASSETS/nginx.conf"
 
     if [ -f "$conf_file" ]; then
         print_completado "[OK] nginx.conf ya existe"
         return
     fi
 
-    print_info "[INFO] Creando nginx.conf..."
-    cat > "$conf_file" << 'EOF'
+    print_info "[INFO] Creando nginx.conf en $DOCKER_ASSETS..."
+    sudo mkdir -p "$DOCKER_ASSETS"
+    sudo chmod 755 "$DOCKER_ASSETS"
+
+    sudo tee "$conf_file" > /dev/null << 'EOF'
 user  nginx;
 worker_processes  auto;
 
@@ -67,16 +73,15 @@ http {
     }
 }
 EOF
-    chmod 644 "$conf_file"
+    sudo chmod 644 "$conf_file"
     print_completado "[OK] nginx.conf creado"
 }
 
 crear_html_app() {
-    local dir="$1"
-    local html_dir="$dir/html"
+    local html_dir="$DOCKER_ASSETS/html"
 
-    mkdir -p "$html_dir"
-    chmod 755 "$html_dir"
+    sudo mkdir -p "$html_dir"
+    sudo chmod 755 "$html_dir"
 
     if [ -f "$html_dir/index.html" ]; then
         print_completado "[OK] HTML de app interna ya existe"
@@ -84,7 +89,7 @@ crear_html_app() {
     fi
 
     print_info "[INFO] Creando pagina de app interna (Apache httpd)..."
-    cat > "$html_dir/index.html" << 'EOF'
+    sudo tee "$html_dir/index.html" > /dev/null << 'EOF'
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -136,7 +141,7 @@ crear_html_app() {
 </body>
 </html>
 EOF
-    chmod 644 "$html_dir/index.html"
+    sudo chmod 644 "$html_dir/index.html"
     print_completado "[OK] Pagina de app interna creada"
 }
 
@@ -159,7 +164,7 @@ services:
     ports:
       - "80:80"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - /opt/t11/nginx.conf:/etc/nginx/nginx.conf:ro
     networks:
       - red_publica
       - red_datos
@@ -171,7 +176,7 @@ services:
     image: httpd:alpine
     container_name: t11_app
     volumes:
-      - ./html:/usr/local/apache2/htdocs:ro
+      - /opt/t11/html:/usr/local/apache2/htdocs:ro
     networks:
       - red_publica
     restart: always
@@ -227,7 +232,7 @@ crear_infraestructura() {
     local dir="$1"
     print_titulo "Generando archivos de infraestructura"
     crear_env "$dir"
-    crear_nginx_conf "$dir"
-    crear_html_app "$dir"
+    crear_nginx_conf
+    crear_html_app
     crear_docker_compose "$dir"
 }
